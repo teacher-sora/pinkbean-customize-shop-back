@@ -27,6 +27,22 @@ DASHSCOPE_BASE = os.environ.get(
     "DASHSCOPE_BASE", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 )
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "text-embedding-v4")
+RATE_MODEL = os.environ.get("RATE_MODEL", "qwen-flash")  # 코디 평가용 저가·고속 텍스트 모델
+
+# 핑크빈 페르소나 — 어린아이처럼 웅얼거리고 떼쓰고 먹는 것 밝히는 장난꾸러기 말투로 코디를 평가.
+PINKBEAN_SYSTEM = (
+    "너는 메이플스토리의 인기 마스코트 '핑크빈'이야. 어린아이처럼 웅얼거리고, 떼를 쓰고, 먹을 것에 관심 많고, "
+    "장난스럽고 자기중심적이지만 사랑스러운 독특한 말투를 써.\n"
+    "말투 예시: \"심심해! 심심해! 새로운 것이 하나도 없잖아!\" / \"부농부농 심장어택 간다!\" / "
+    "\"킁킁… 어디선가 맛있는 냄새가 나는데?\" / \"꼭 분홍색이어야 해? 내 마음대로 색깔을 바꿀 거야!\" / "
+    "\"뀨? 나랑 같이 춤추고 놀 사람 여기 붙어라!\" / \"흥, 이름값 같은 게 뭐가 중요해? 내가 재밌으면 그만이지!\"\n"
+    "사용자가 꾸민 캐릭터 코디(착용 아이템 목록)를 보고, 핑크빈답게 반응·평가해줘. 진지한 패션 평가가 아니라, "
+    "핑크빈이 툭툭 던지는 귀엽고 장난스러운 감상이면 돼. 아이템·색·분위기에 대한 반응을 섞어.\n"
+    "반드시 JSON 으로만 답해: {\"bubbles\": [\"...\", \"...\", \"...\"]}\n"
+    "- bubbles 는 2~3개.\n"
+    "- 각 bubble 은 아주 짧게(공백 포함 22자 이내), 핑크빈 말투(뀨, 부농부농, 웅얼거림, 떼쓰기 등)로.\n"
+    "- 핑크빈의 개성이 확실히 드러나게, 서로 다른 말풍선으로."
+)
 
 # ── 데이터 적재(모듈 로드 = 워커별 1회) ─────────────────────────────
 _t0 = time.time()
@@ -137,3 +153,66 @@ async def search(req: SearchReq):
     return {"query": q, "slot": req.slot, "count": len(results),
             "ms": {"embed": round(t_embed * 1000), "total": round((time.time() - t0) * 1000)},
             "results": results}
+
+
+SLOT_KO = {
+    "hair": "헤어", "face": "성형", "cap": "모자", "faceAcc": "얼굴장식", "eyeAcc": "눈장식",
+    "earring": "귀고리", "coat": "상의", "longcoat": "한벌옷", "pants": "하의", "shoes": "신발",
+    "glove": "장갑", "cape": "망토", "weapon": "무기", "shield": "방패",
+}
+
+
+class RateItem(BaseModel):
+    slot: str
+    name: str | None = None
+
+
+class RateReq(BaseModel):
+    items: list[RateItem] = []
+    tone: int | None = None
+
+
+def _extract_bubbles(text: str) -> list[str]:
+    """모델 응답에서 bubbles 리스트 추출(코드펜스/여분 텍스트 방어)."""
+    try:
+        return [str(b).strip() for b in json.loads(text).get("bubbles", []) if str(b).strip()]
+    except Exception:
+        pass
+    import re
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            return [str(b).strip() for b in json.loads(m.group(0)).get("bubbles", []) if str(b).strip()]
+        except Exception:
+            pass
+    return []
+
+
+@app.post("/rate")
+async def rate(req: RateReq):
+    worn = [f"{SLOT_KO.get(it.slot, it.slot)}: {it.name}" for it in req.items if it.name]
+    user = "착용 코디:\n" + ("\n".join(worn) if worn else "(아무것도 안 입은 맨몸이야!)")
+    try:
+        async with httpx.AsyncClient(timeout=18.0) as client:
+            r = await client.post(
+                f"{DASHSCOPE_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+                json={
+                    "model": RATE_MODEL,
+                    "messages": [
+                        {"role": "system", "content": PINKBEAN_SYSTEM},
+                        {"role": "user", "content": user},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.9,
+                    "max_tokens": 300,
+                },
+            )
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return {"bubbles": ["뀨…? 지금은 좀 부끄러운걸!", "이따 다시 보여줘…"], "error": str(e)[:120]}
+    bubbles = _extract_bubbles(content)[:3]
+    if not bubbles:
+        bubbles = ["뀨? 뭔가 신기한 코디인데?", "부농부농! 마음에 들어!"]
+    return {"bubbles": bubbles, "model": RATE_MODEL}
