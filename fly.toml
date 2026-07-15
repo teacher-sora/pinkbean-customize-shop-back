@@ -4,18 +4,18 @@ primary_region = 'nrt'  # 도쿄(한국 최근접) → 지연 최소
 [build]
 
 [env]
-  WEB_CONCURRENCY = '4'   # 단일 머신의 uvicorn 워커 수(요청 병렬). 필요 시 늘림.
+  WEB_CONCURRENCY = '1'   # 저트래픽 검색 API — 1워커로 충분(임베딩은 async I/O라 단일워커도 동시처리).
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = 'suspend'  # 유휴 시 머신 정지 → 사실상 $0. 요청 오면 자동 재개(빠른 resume).
   auto_start_machines = true
-  min_machines_running = 1   # 항상 1대 예열 → 콜드스타트 제거(속도 우선).
+  min_machines_running = 0        # 상시 켜두지 않음(비용 최소). 첫 요청만 짧은 웨이크.
   processes = ['app']
 
-# 단일 머신에 리소스 집중 + 워커 다중화(2머신 HA 아님 — `fly scale count 1`).
+# 최소 리소스(검색 자체는 matmul 수 ms). 비용 ~월 $1 목표.
 [[vm]]
-  memory_mb = 1024
+  memory_mb = 512
   cpu_kind = 'shared'
-  cpus = 2
+  cpus = 1
