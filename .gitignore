@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.local
+*.log
+.DS_Store
+# data/ (vectors_*.npy, meta.json) 는 배포 페이로드 → 커밋함

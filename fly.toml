@@ -1,0 +1,17 @@
+app = 'pinkbean-customize-shop-back'
+primary_region = 'nrt'  # 도쿄(한국 최근접) → 지연 최소
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 1   # 항상 1대 예열 → 콜드스타트 제거(속도 우선). $0 원하면 0 으로.
+  processes = ['app']
+
+[[vm]]
+  memory_mb = 512
+  cpu_kind = 'shared'
+  cpus = 1
