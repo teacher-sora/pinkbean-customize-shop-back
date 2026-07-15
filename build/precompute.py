@@ -39,13 +39,22 @@ vectors = emb["vectors"]
 docs_by_id = {d["id"]: d for d in docs}
 print(f"[precompute] embeddings={len(vectors)} (dim={dim}, model={model}) docs={len(docs)}")
 
+# 캐시 스코프: 임베딩/검색 대상은 "캐시 아이템만".
+# 사용자 정의상 헤어·성형·피부는 (기본 아이템이라 isCash=false 여도) 캐시로 간주해 포함한다.
+def in_cash_scope(d):
+    return bool(d.get("isCash")) or d.get("slot") in ("hair", "face", "skin")
+
 ids, rows, items = [], [], []
 missing = 0
+skipped_noncash = 0
 for rec in vectors:
     _id = rec["id"]
     d = docs_by_id.get(_id)
     if d is None:
         missing += 1
+        continue
+    if not in_cash_scope(d):          # 비캐시 일반 아이템은 임베딩/검색에서 제외
+        skipped_noncash += 1
         continue
     v = np.asarray(rec["v"], dtype=np.float32)
     n = np.linalg.norm(v)
@@ -65,6 +74,8 @@ for rec in vectors:
 
 if missing:
     print(f"[precompute] ⚠ search-docs 에 없는 벡터 {missing}건 스킵")
+if skipped_noncash:
+    print(f"[precompute] 비캐시(캐시 스코프 밖) {skipped_noncash}건 제외 — 임베딩/검색은 캐시 아이템만")
 
 mat = np.asarray(rows, dtype=np.float16)  # 저장은 f16(용량↓), 로드 시 f32 로 업캐스트
 os.makedirs(os.path.join(BACK, "data"), exist_ok=True)

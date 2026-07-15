@@ -58,7 +58,11 @@ for i, it in enumerate(ITEMS):
     SLOT_ROWS.setdefault(it["slot"], []).append(i)
 SLOT_ROWS = {k: np.asarray(v, dtype=np.int64) for k, v in SLOT_ROWS.items()}
 GENDERS = np.asarray([it.get("gender") if it.get("gender") is not None else 2 for it in ITEMS], dtype=np.int64)  # 0남/1여/2공용
-print(f"[app] loaded {N} vectors dim={DIM} in {time.time()-_t0:.2f}s · slots={list(SLOT_ROWS)}")
+# 캐시 스코프: 검색 대상은 캐시 아이템만(헤어·성형·피부는 기본 아이템이라 isCash=false 여도 포함).
+# precompute 가 이미 캐시만 임베딩하면 전부 True; 옛 전량 임베딩에서도 방어적으로 캐시만 반환한다.
+CASH_MASK = np.asarray([bool(it.get("isCash")) or it.get("slot") in ("hair", "face", "skin") for it in ITEMS], dtype=bool)
+CASH_ROWS = np.nonzero(CASH_MASK)[0]
+print(f"[app] loaded {N} vectors dim={DIM} in {time.time()-_t0:.2f}s · slots={list(SLOT_ROWS)} · cash={int(CASH_MASK.sum())}")
 
 # 질의문 성별 의도 감지. 안전한 토큰만(‘여우/여름/남색’ 오탐 방지 위해 단일 ‘여/남’ 은 제외).
 _FEMALE = ["여자", "여성", "여캐", "여아", "여자아이", "여캐릭", "걸즈", "소녀"]
@@ -125,23 +129,17 @@ async def search(req: SearchReq):
     qv = await embed_query(cleaned)
     t_embed = time.time() - t0
 
+    # 후보는 항상 캐시 스코프 안에서(슬롯 지정 시 그 슬롯의 캐시분, 아니면 전체 캐시).
     has_slot = bool(req.slot and req.slot in SLOT_ROWS)
-    if has_slot or allowed_g is not None:
-        rows = SLOT_ROWS[req.slot] if has_slot else np.arange(N)
-        if allowed_g is not None:
-            rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
-        if len(rows) == 0:
-            return {"query": q, "slot": req.slot, "count": 0, "results": []}
-        scores = MAT[rows] @ qv
-        k = min(req.topK, len(rows))
-        order = np.argsort(-scores)[:k]
-        top, top_scores = rows[order], scores[order]
-    else:
-        scores = MAT @ qv
-        k = min(req.topK, N)
-        idx = np.argpartition(-scores, k - 1)[:k]
-        idx = idx[np.argsort(-scores[idx])]
-        top, top_scores = idx, scores[idx]
+    rows = SLOT_ROWS[req.slot][CASH_MASK[SLOT_ROWS[req.slot]]] if has_slot else CASH_ROWS
+    if allowed_g is not None:
+        rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
+    if len(rows) == 0:
+        return {"query": q, "slot": req.slot, "count": 0, "results": []}
+    scores = MAT[rows] @ qv
+    k = min(req.topK, len(rows))
+    order = np.argsort(-scores)[:k]
+    top, top_scores = rows[order], scores[order]
 
     results = []
     for row, sc in zip(top.tolist(), np.asarray(top_scores).tolist()):
