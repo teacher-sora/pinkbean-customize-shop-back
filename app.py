@@ -40,7 +40,27 @@ SLOT_ROWS: dict[str, np.ndarray] = {}
 for i, it in enumerate(ITEMS):
     SLOT_ROWS.setdefault(it["slot"], []).append(i)
 SLOT_ROWS = {k: np.asarray(v, dtype=np.int64) for k, v in SLOT_ROWS.items()}
+GENDERS = np.asarray([it.get("gender") if it.get("gender") is not None else 2 for it in ITEMS], dtype=np.int64)  # 0남/1여/2공용
 print(f"[app] loaded {N} vectors dim={DIM} in {time.time()-_t0:.2f}s · slots={list(SLOT_ROWS)}")
+
+# 질의문 성별 의도 감지. 안전한 토큰만(‘여우/여름/남색’ 오탐 방지 위해 단일 ‘여/남’ 은 제외).
+_FEMALE = ["여자", "여성", "여캐", "여아", "여자아이", "여캐릭", "걸즈", "소녀"]
+_MALE = ["남자", "남성", "남캐", "남아", "남자아이", "남캐릭", "소년"]
+
+
+def detect_gender(q: str):
+    """(allowed_genders|None, 성별토큰 제거한 질의) 반환. allowed 예: 여자→{1,2}, 남자→{0,2}."""
+    allowed = None
+    cleaned = q
+    if any(w in q for w in _FEMALE):
+        allowed = {1, 2}
+        for w in _FEMALE:
+            cleaned = cleaned.replace(w, " ")
+    elif any(w in q for w in _MALE):
+        allowed = {0, 2}
+        for w in _MALE:
+            cleaned = cleaned.replace(w, " ")
+    return allowed, " ".join(cleaned.split()) or q
 
 app = FastAPI(title="pinkbean-customize-shop-back", version="1.0")
 app.add_middleware(
@@ -83,16 +103,22 @@ async def search(req: SearchReq):
     q = (req.query or "").strip()
     if not q:
         return {"query": q, "count": 0, "results": []}
+    allowed_g, cleaned = detect_gender(q)  # 성별 필터 + 임베딩용 정제 질의
     t0 = time.time()
-    qv = await embed_query(q)
+    qv = await embed_query(cleaned)
     t_embed = time.time() - t0
 
-    if req.slot and req.slot in SLOT_ROWS:
-        rows = SLOT_ROWS[req.slot]
+    has_slot = bool(req.slot and req.slot in SLOT_ROWS)
+    if has_slot or allowed_g is not None:
+        rows = SLOT_ROWS[req.slot] if has_slot else np.arange(N)
+        if allowed_g is not None:
+            rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
+        if len(rows) == 0:
+            return {"query": q, "slot": req.slot, "count": 0, "results": []}
         scores = MAT[rows] @ qv
         k = min(req.topK, len(rows))
-        top = rows[np.argsort(-scores)[:k]]
-        top_scores = MAT[top] @ qv
+        order = np.argsort(-scores)[:k]
+        top, top_scores = rows[order], scores[order]
     else:
         scores = MAT @ qv
         k = min(req.topK, N)
