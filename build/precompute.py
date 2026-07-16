@@ -39,10 +39,17 @@ vectors = emb["vectors"]
 docs_by_id = {d["id"]: d for d in docs}
 print(f"[precompute] embeddings={len(vectors)} (dim={dim}, model={model}) docs={len(docs)}")
 
-# 캐시 스코프: 임베딩/검색 대상은 "캐시 아이템만".
-# 사용자 정의상 헤어·성형·피부는 (기본 아이템이라 isCash=false 여도) 캐시로 간주해 포함한다.
+# 캡션/임베딩/검색 스코프(2026-07-17 확정): 아래 12개 슬롯의 캐시 아이템만.
+# earring(귀고리)·shield(방패)·skin(피부)는 착용해도 거의 안 보여 검색에 방해만 되므로 의도적 제외.
+# 헤어·성형은 기본 아이템이라 isCash=false 여도 커스터마이즈 대상이므로 포함.
+CAPTION_SLOTS = {"hair", "face", "cap", "faceAcc", "eyeAcc",
+                 "coat", "longcoat", "pants", "shoes", "glove", "cape", "weapon"}
+
 def in_cash_scope(d):
-    return bool(d.get("isCash")) or d.get("slot") in ("hair", "face", "skin")
+    s = d.get("slot")
+    if s not in CAPTION_SLOTS:
+        return False
+    return s in ("hair", "face") or bool(d.get("isCash"))
 
 ids, rows, items = [], [], []
 missing = 0

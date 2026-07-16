@@ -58,9 +58,16 @@ for i, it in enumerate(ITEMS):
     SLOT_ROWS.setdefault(it["slot"], []).append(i)
 SLOT_ROWS = {k: np.asarray(v, dtype=np.int64) for k, v in SLOT_ROWS.items()}
 GENDERS = np.asarray([it.get("gender") if it.get("gender") is not None else 2 for it in ITEMS], dtype=np.int64)  # 0남/1여/2공용
-# 캐시 스코프: 검색 대상은 캐시 아이템만(헤어·성형·피부는 기본 아이템이라 isCash=false 여도 포함).
-# precompute 가 이미 캐시만 임베딩하면 전부 True; 옛 전량 임베딩에서도 방어적으로 캐시만 반환한다.
-CASH_MASK = np.asarray([bool(it.get("isCash")) or it.get("slot") in ("hair", "face", "skin") for it in ITEMS], dtype=bool)
+# 검색 스코프(2026-07-17 확정): 아래 12개 슬롯의 캐시 아이템만.
+# earring(귀고리)·shield(방패)·skin(피부)는 착용해도 거의 안 보여 검색에 방해만 되므로 의도적 제외.
+# 헤어·성형은 기본 아이템이라 isCash=false 여도 포함. precompute 가 이미 이 스코프로 임베딩하면 전부 True;
+# 옛 전량 임베딩에서도 방어적으로 스코프 밖을 걸러낸다.
+CAPTION_SLOTS = {"hair", "face", "cap", "faceAcc", "eyeAcc",
+                 "coat", "longcoat", "pants", "shoes", "glove", "cape", "weapon"}
+CASH_MASK = np.asarray([
+    it.get("slot") in CAPTION_SLOTS and (it.get("slot") in ("hair", "face") or bool(it.get("isCash")))
+    for it in ITEMS
+], dtype=bool)
 CASH_ROWS = np.nonzero(CASH_MASK)[0]
 print(f"[app] loaded {N} vectors dim={DIM} in {time.time()-_t0:.2f}s · slots={list(SLOT_ROWS)} · cash={int(CASH_MASK.sum())}")
 
