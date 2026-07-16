@@ -12,6 +12,7 @@ import os
 import re
 import json
 import time
+import random
 import numpy as np
 import httpx
 from fastapi import FastAPI
@@ -39,11 +40,15 @@ PINKBEAN_SYSTEM = (
     "사용자가 꾸민 캐릭터의 코디(착용 아이템)를 보고, 핑크빈이 그 자리에서 문득 떠오른 대로 '툭 던지는 혼잣말·감상'을 해줘. "
     "점수를 매기거나 심사하듯 평가하는 게 아니라, 코디를 구경하다가 자연스럽게 튀어나오는 반응이야.\n"
     "반드시 JSON 으로만 답해: {\"bubbles\": [\"...\", \"...\"]}\n"
-    "- bubbles 는 보통 2개. 아주 가끔(정말 할 말이 넘칠 때)만 3개.\n"
+    "- bubbles 개수는 사용자 메시지에 적힌 수를 **정확히** 지켜라.\n"
     "- 각 bubble 은 뜻이 자연스럽게 통하는 '완성된 한 문장'. 앞뒤 안 맞는 말이나 어색한 비유(예: 맛있겠다 했다가 맛없겠다) 금지.\n"
     "- 먹는 것에 억지로 갖다붙이지 말 것. 정말 어울릴 때만 가볍게.\n"
     "- 너무 길지 않게(공백 포함 35자 이내), 서로 다른 내용으로.\n"
-    "- ⚠️ '뀨', '부농부농' 같은 의성어·말버릇은 남발 금지. 보통은 안 쓰고, 아주 가끔 최대 1개만."
+    "- ⚠️ '뀨', '부농부농' 같은 의성어·말버릇은 남발 금지. 보통은 안 쓰고, 아주 가끔 최대 1개만.\n"
+    "- ⚠️ **반말로만** 말해라(핑크빈은 어린아이다). '~요', '~니다' 같은 존댓말 금지.\n"
+    "- ★ 아이템마다 '생김새'가 함께 적혀 있으면 **그 생김새를 보고** 반응해라(이름만 보고 넘겨짚지 말 것).\n"
+    "- ★ 매번 **다른 곳에 눈이 가야 한다.** 머리·옷·신발·무기·장식 등 여러 부위 중 이번엔 무엇이 눈에 띄었는지 골라서 말해라.\n"
+    "- ★ '방금 한 말'이 주어지면 **그것과 겹치는 소재·표현은 피하고** 새로운 얘기를 해라."
 )
 
 # ── 데이터 적재(모듈 로드 = 워커별 1회) ─────────────────────────────
@@ -67,6 +72,8 @@ CAPTION_SLOTS = {"hair", "face", "cap", "faceAcc", "eyeAcc",
                  "coat", "longcoat", "pants", "shoes", "glove", "cape", "weapon"}
 SCOPE_MASK = np.asarray([it.get("slot") in CAPTION_SLOTS for it in ITEMS], dtype=bool)
 SCOPE_ROWS = np.nonzero(SCOPE_MASK)[0]
+# id → 아이템(캡션 words 조회용). 코디 평가가 "이름"이 아니라 "생김새"를 보고 말하게 한다.
+BY_ID = {it["id"]: it for it in ITEMS}
 
 # ── 이름 검색용 정규화 인덱스 ────────────────────────────────────────
 # 검색 근거는 "캡션(=벡터)" + "아이템 이름(=아래 부분일치)" 딱 두 가지뿐이다.
@@ -299,11 +306,13 @@ SLOT_KO = {
 class RateItem(BaseModel):
     slot: str
     name: str | None = None
+    id: str | None = None  # 있으면 골드 캡션(생김새)을 붙여 보낸다 → 핑크빈이 이름이 아니라 "모습"을 보고 말한다
 
 
 class RateReq(BaseModel):
     items: list[RateItem] = []
     tone: int | None = None
+    history: list[str] = []  # 직전에 한 말(반복 방지)
 
 
 def _extract_bubbles(text: str) -> list[str]:
@@ -324,8 +333,26 @@ def _extract_bubbles(text: str) -> list[str]:
 
 @app.post("/rate")
 async def rate(req: RateReq):
-    worn = [f"{SLOT_KO.get(it.slot, it.slot)}: {it.name}" for it in req.items if it.name]
-    user = "착용 코디:\n" + ("\n".join(worn) if worn else "(아무것도 안 입은 맨몸이야!)")
+    # 아이템 이름만 보내면 "윈디 헤어(여)" 처럼 생김새 정보가 없어 모델이 헤어를 무시하고
+    # 이름이 튀는 옷/장식에만 반응했다(헤어를 바꿔도 같은 말이 나오던 원인).
+    # → 골드 캡션(words)을 함께 붙여 "모습"을 보고 말하게 한다.
+    worn = []
+    for it in req.items:
+        if not it.name:
+            continue
+        line = f"{SLOT_KO.get(it.slot, it.slot)}: {it.name}"
+        meta = BY_ID.get(it.id or "")
+        if meta and meta.get("words"):
+            line += f" — {', '.join(meta['words'])}"
+        worn.append(line)
+    # 말풍선 개수: 2개 또는 3개를 50:50 으로. 모델에 맡기면 늘 2개만 나왔다.
+    n = random.choice((2, 3))
+    parts = ["착용 코디:\n" + ("\n".join(worn) if worn else "(아무것도 안 입은 맨몸이야!)")]
+    hist = [h for h in (req.history or []) if h][:6]
+    if hist:
+        parts.append("방금 한 말(겹치지 마):\n" + "\n".join(f"- {h}" for h in hist))
+    parts.append(f"말풍선 {n}개로 말해줘.")
+    user = "\n\n".join(parts)
     try:
         async with httpx.AsyncClient(timeout=18.0) as client:
             r = await client.post(
@@ -346,7 +373,9 @@ async def rate(req: RateReq):
             content = r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         return {"bubbles": ["뀨…? 지금은 좀 부끄러운걸!", "이따 다시 보여줘…"], "error": str(e)[:120]}
-    bubbles = _extract_bubbles(content)[:3]
+    bubbles = _extract_bubbles(content)
+    if len(bubbles) > n:      # 모델이 개수를 어기면 코드로 맞춘다
+        bubbles = bubbles[:n][:3]
     if not bubbles:
         bubbles = ["뀨? 뭔가 신기한 코디인데?", "부농부농! 마음에 들어!"]
     return {"bubbles": bubbles, "model": RATE_MODEL}
