@@ -109,6 +109,82 @@ def detect_gender(q: str):
     return allowed, " ".join(cleaned.split()) or q
 
 
+# ── 질의 정제(LLM) ───────────────────────────────────────────────────
+# 왜 필요한가: 아이템은 "보이는 특징을 단어로만 나열한" 캡션으로 색인돼 있는데(예 ["단발","일자앞머리"]),
+# 사용자는 문장으로 검색한다("한벌옷에 스타킹 달린거"). 형태가 다르면 임베딩이 어긋난다.
+# 게다가 부위를 말해도("신발") 슬롯 필터로 쓰이지 않아 엉뚱한 슬롯이 1등으로 나왔다.
+# → 질의를 캡션과 같은 형태(단어 나열)로 바꾸고, 부위/성별은 필터로 분리한다.
+REFINE_MODEL = os.environ.get("REFINE_MODEL", "qwen-flash")  # 저가·고속
+# ⚠️ 이 프롬프트에 "캡션 예시"를 넣지 말 것. 넣었더니 모델이 그 예시 단어를 그대로 베껴서
+# 사용자가 말하지도 않은 특징을 질의에 주입했다(예: '세갈래' 질의에 '단발·끝플립'이 붙음).
+# 캡션 규칙과 같은 함정 — 예시를 주면 그 틀에 갇힌다. 형식만 설명하고 예시는 주지 않는다.
+REFINE_SYSTEM = (
+    "너는 메이플스토리 아이템 검색의 질의 전처리기다.\n"
+    "아이템은 '눈에 보이는 시각 특징을 짧은 단어로만 나열한' 캡션으로 색인돼 있다. "
+    "사용자 문장을 그 캡션과 **같은 형태(시각 특징 단어 나열)**로 바꾸는 것이 네 일이다.\n"
+    "반드시 JSON 으로만 답해: {\"words\":[...],\"slot\":\"<슬롯|null>\",\"gender\":\"f|m|null\"}\n"
+    "규칙:\n"
+    "- ★ **사용자가 말한 것만 남긴다. 말하지 않은 특징을 절대 추가하지 마라.**\n"
+    "  (길이·색·모양 등을 사용자가 언급하지 않았다면 네가 상상해서 넣지 말 것.)\n"
+    "- words = 사용자가 말한 '생김새' 단어만. 조사·어미·군더더기(달린거, 같은, 느낌, 찾아줘, 추천, 예쁜)는 버린다.\n"
+    "- 주관·감상(청순한, 귀여운, 힙한)은 생김새가 아니므로 버린다.\n"
+    "- 부위를 가리키는 말은 words 에 넣지 말고 slot 으로 뺀다.\n"
+    "  slot 값: hair(헤어/머리) face(성형/눈) cap(모자/탈/투구) faceAcc(얼굴장식) eyeAcc(눈장식/안경)\n"
+    "  coat(상의) longcoat(한벌옷/원피스/드레스) pants(하의/바지/치마) shoes(신발) glove(장갑)\n"
+    "  cape(망토) weapon(무기). 부위 언급이 없으면 null.\n"
+    "- 성별을 가리키는 말(여자/여성/남자/남성…)은 words 에 넣지 말고 gender(f/m)로 뺀다. 없으면 null.\n"
+    "- ★ **동의어·유사어를 새로 만들어 넣지 마라.** 사용자가 쓴 낱말을 그대로 쓴다"
+    "(억지 확장이 오히려 엉뚱한 결과를 부른다).\n"
+    "- words 는 최대 6개. 부정 표현('~없는', '~아닌')은 통째로 버린다.\n"
+    "- 아이템 이름으로 보이면 그 이름을 words 에 그대로 남긴다."
+)
+
+
+# 부위를 가리키는 말은 words 에 남으면 임베딩을 오염시킨다(캡션엔 부위명이 안 들어있으므로).
+# LLM 이 가끔 slot 으로 빼놓고도 words 에 남겨서("스타킹 한벌옷") 결과가 망가졌다 → 코드로 확실히 제거.
+# 유추된 그 슬롯의 표현만 지운다(예: slot=longcoat 일 때만 '한벌옷' 제거) → 특징어를 잘못 지우지 않는다.
+SLOT_WORDS = {
+    "hair": ("헤어", "머리"), "face": ("성형",), "cap": ("모자",), "faceAcc": ("얼굴장식",),
+    "eyeAcc": ("눈장식", "안경"), "coat": ("상의",), "longcoat": ("한벌옷", "원피스", "드레스"),
+    "pants": ("하의", "바지"), "shoes": ("신발",), "glove": ("장갑",), "cape": ("망토",),
+    "weapon": ("무기",),
+}
+
+
+async def refine_query(q: str):
+    """문장 → (words, slot|None, gender|None). 실패하면 None (호출부가 규칙 기반으로 폴백)."""
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.post(
+                f"{DASHSCOPE_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+                json={
+                    "model": REFINE_MODEL,
+                    "messages": [{"role": "system", "content": REFINE_SYSTEM},
+                                 {"role": "user", "content": q}],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0,
+                    "max_tokens": 200,
+                },
+            )
+            r.raise_for_status()
+            d = json.loads(r.json()["choices"][0]["message"]["content"])
+        words = [str(w).strip() for w in (d.get("words") or []) if str(w).strip()][:6]
+        slot = d.get("slot") if d.get("slot") in CAPTION_SLOTS else None
+        g = d.get("gender")
+        gender = {1, 2} if g == "f" else {0, 2} if g == "m" else None
+        if slot:  # 유추된 슬롯의 부위어가 words 에 남아있으면 제거(임베딩 오염 방지)
+            drop = SLOT_WORDS.get(slot, ())
+            pruned = [w for w in words if w not in drop]
+            if pruned:  # 전부 지워지면(부위만 말한 질의) 원래 words 유지
+                words = pruned
+        if not words:
+            return None
+        return words, slot, gender
+    except Exception:
+        return None
+
+
 def name_bonus_for(rows: np.ndarray, cleaned_query: str) -> np.ndarray:
     """이름 부분일치 가산점. 정규화한 질의가 이름에 통째로 들어가면 가산.
 
@@ -166,20 +242,34 @@ async def search(req: SearchReq):
     q = (req.query or "").strip()
     if not q:
         return {"query": q, "count": 0, "results": []}
-    allowed_g, cleaned = detect_gender(q)  # 성별 필터 + 임베딩용 정제 질의
     t0 = time.time()
-    qv = await embed_query(cleaned)
-    t_embed = time.time() - t0
+    # ① LLM 정제: 문장 → 캡션과 같은 형태(단어 나열) + 부위/성별 분리. 실패하면 규칙 기반으로 폴백.
+    ref = await refine_query(q)
+    if ref:
+        words, ref_slot, allowed_g = ref
+        cleaned = " ".join(words)
+    else:
+        ref_slot = None
+        allowed_g, cleaned = detect_gender(q)  # 폴백: 성별 토큰만 제거
+    t_refine = time.time() - t0
 
-    # 후보는 항상 스코프 안에서(슬롯 지정 시 그 슬롯, 아니면 전체). 성별 의도가 있으면 반대 성별을 제외.
-    has_slot = bool(req.slot and req.slot in SLOT_ROWS)
-    rows = SLOT_ROWS[req.slot][SCOPE_MASK[SLOT_ROWS[req.slot]]] if has_slot else SCOPE_ROWS
+    t1 = time.time()
+    qv = await embed_query(cleaned)
+    t_embed = time.time() - t1
+
+    # 후보는 항상 스코프 안에서. 부위는 **사용자가 고른 것(req.slot)이 우선**, 없으면 질의에서 유추한 것.
+    # 성별 의도가 있으면 반대 성별을 제외.
+    slot = req.slot if (req.slot and req.slot in SLOT_ROWS) else ref_slot
+    has_slot = bool(slot and slot in SLOT_ROWS)
+    rows = SLOT_ROWS[slot][SCOPE_MASK[SLOT_ROWS[slot]]] if has_slot else SCOPE_ROWS
     if allowed_g is not None:
         rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
     if len(rows) == 0:
-        return {"query": q, "slot": req.slot, "count": 0, "results": []}
+        return {"query": q, "slot": slot, "count": 0, "results": []}
     # 점수 = 캡션 벡터 코사인 + 이름 부분일치 가산점 (검색 근거는 이 둘뿐)
-    scores = MAT[rows] @ qv + NAME_BONUS * name_bonus_for(rows, cleaned)
+    # 이름은 정제문·원문 **둘 다**로 본다 — 정제가 이름을 쪼개거나 부위를 떼어내도 이름 검색이 죽지 않도록.
+    nb = np.maximum(name_bonus_for(rows, cleaned), name_bonus_for(rows, detect_gender(q)[1]))
+    scores = MAT[rows] @ qv + NAME_BONUS * nb
     k = min(req.topK, len(rows))
     order = np.argsort(-scores)[:k]
     top, top_scores = rows[order], scores[order]
@@ -193,8 +283,9 @@ async def search(req: SearchReq):
             "words": it.get("words") or [], "tier": it.get("tier"),
             "score": round(float(sc), 4),
         })
-    return {"query": q, "slot": req.slot, "count": len(results),
-            "ms": {"embed": round(t_embed * 1000), "total": round((time.time() - t0) * 1000)},
+    return {"query": q, "slot": slot, "refined": cleaned, "count": len(results),
+            "ms": {"refine": round(t_refine * 1000), "embed": round(t_embed * 1000),
+                   "total": round((time.time() - t0) * 1000)},
             "results": results}
 
 
