@@ -138,6 +138,50 @@ COLOR_BONUS, COLOR_PEN = 0.15, 0.12
 # 거리 임계: 개념 질의에서 top1 코사인의 이 비율 미만인 후보는 "무관"으로 컷(개수 채우기 방지).
 # 쿼리마다 코사인 절대값이 달라 상대비율이 안전. 0.72 = 최상위와 비슷하게 가까운 것만 남김.
 DIST_RATIO = 0.72
+# 전체 검색 슬롯-관련도 게이트: 슬롯 최상위가 전역 최상위의 이 비율 이상일 때만 그 슬롯을 포함.
+# 교차슬롯 개념(스타킹: 바지/한벌옷/신발 모두)은 여러 슬롯이 통과, 단일슬롯 개념(총: 무기만)은 하나만.
+SLOT_GATE = 0.62
+
+# ── 무기 타입-매칭 점수 ─────────────────────────────────────────────
+# 무기의 정체성 = 타입(총/검/창/활...). 임베딩이 타입을 잘 못 가르므로, 캡션 형태토큰으로
+# 계열을 뽑아 타입 질의 시 일치 가산/불일치 감점. (색-매칭과 동일 패턴)
+_WTYPE = {
+    '총': '총', '엽총': '총', '런처': '총', '새총': '총', '물총': '총', '라이플': '총', '레이저건': '총',
+    '작살총': '총', '슈터': '총', '건': '총', '대포': '총', '머스킷': '총', '권총': '총', '개틀링': '총',
+    '검': '검', '대검': '검', '쌍검': '검', '단검': '검', '세이버': '검', '블레이드': '검', '소드': '검',
+    '도': '검', '태도': '검', '장검': '검', '칼': '검', '레이피어': '검', '에너지소드': '검', '광선검': '검',
+    '창': '창', '폴암': '창', '랜스': '창', '삼지창': '창', '표창': '창', '스피어': '창',
+    '활': '활', '석궁': '활', '보우': '활', '쇠뇌': '활', '크로스보우': '활',
+    '도끼': '도끼', '낫': '낫',
+    '둔기': '둔기', '망치': '둔기', '해머': '둔기', '몽둥이': '둔기', '방망이': '둔기', '메이스': '둔기',
+    '지팡이': '지팡이', '스태프': '지팡이', '완드': '지팡이', '봉': '지팡이', '로드': '지팡이', '고서': '책', '책': '책',
+    '부채': '부채', '오브': '오브', '너클': '너클', '건틀렛': '너클', '채찍': '채찍', '아대': '아대',
+}
+_WTYPE_QUERY = {'총': '총', '권총': '총', '엽총': '총', '검': '검', '칼': '검', '창': '창', '활': '활',
+                '도끼': '도끼', '낫': '낫', '둔기': '둔기', '지팡이': '지팡이', '스태프': '지팡이',
+                '너클': '너클', '부채': '부채', '석궁': '활'}
+
+
+def _weapon_type(it):
+    if it.get("slot") != "weapon":
+        return None
+    words = it.get("words") or []
+    for w in ([words[0]] + words if words else []):  # 첫 토큰(형태) 우선
+        for k, fam in _WTYPE.items():
+            if w == k or w.endswith(k):
+                return fam
+    return None
+
+
+def weapon_query_type(text: str):
+    for k, fam in _WTYPE_QUERY.items():
+        if k in (text or ""):
+            return fam
+    return None
+
+
+ITEM_WTYPE = [_weapon_type(it) for it in ITEMS]
+WTYPE_BONUS, WTYPE_PEN = 0.20, 0.15
 # 검색 스코프(2026-07-17 확정): 아래 12개 슬롯만. earring(귀고리)·shield(방패)·skin(피부)는
 # 착용해도 거의 안 보여 검색 방해라 제외. 스코프는 build/from_transfer.py 가 이미 강제하지만,
 # 잘못된 데이터가 들어와도 스코프 밖이 새어나오지 않도록 방어적으로 한 번 더 건다.
@@ -345,10 +389,11 @@ async def search(req: SearchReq):
     qv = await embed_query(cleaned)
     t_embed = time.time() - t1
 
-    # 후보는 항상 스코프 안에서. 부위는 **사용자가 고른 것(req.slot)이 우선**, 없으면 질의에서 유추한 것.
-    # 성별 의도가 있으면 반대 성별을 제외.
-    slot = req.slot if (req.slot and req.slot in SLOT_ROWS) else ref_slot
-    has_slot = bool(slot and slot in SLOT_ROWS)
+    # 후보는 항상 스코프 안에서. 부위는 **사용자가 고른 것(req.slot)만** 하드 제한한다.
+    # 유추 슬롯(ref_slot)으로는 제한하지 않는다 — "전체"에서 '스타킹'을 치면 바지로 갇혀 한벌옷/신발
+    # 스타킹이 사라지던 문제 때문. 대신 전체 검색은 아래 슬롯-관련도 게이트로 관련 슬롯만 남긴다.
+    slot = req.slot if (req.slot and req.slot in SLOT_ROWS) else None
+    has_slot = bool(slot)
     rows = SLOT_ROWS[slot][SCOPE_MASK[SLOT_ROWS[slot]]] if has_slot else SCOPE_ROWS
     if allowed_g is not None:
         rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
@@ -358,23 +403,42 @@ async def search(req: SearchReq):
     # 이름은 정제문·원문 **둘 다**로 본다 — 정제가 이름을 쪼개거나 부위를 떼어내도 이름 검색이 죽지 않도록.
     base = MAT[rows] @ qv  # 순수 개념 코사인(거리)
     nb = np.maximum(name_bonus_for(rows, cleaned), name_bonus_for(rows, detect_gender(q)[1]))
-    # ★ 거리 임계: 개수를 채우지 말고 "가까운 것만" 남긴다. 개념 질의는 top1 대비 상대임계로
-    #   무관한 꼬리를 컷(쿼리마다 코사인 절대값이 달라 상대값이 안전). 이름매칭은 항상 포함.
-    #   순수 색 질의("초록색")는 개념이 없으니 컷하지 않고 색 점수로만 정렬.
-    if concept_words and len(base):
-        top1 = float(base.max())
-        keep = (base >= top1 * DIST_RATIO) | (nb > 0)
+    wq = weapon_query_type(cleaned)  # 무기 타입 질의(총/검/창...) — 색토큰이 빠진 cleaned 기준
+    # 무기 타입 가산을 "관련도"에 미리 반영: 총류는 임베딩 코사인이 낮아도 거리컷에 안 잘리게.
+    rel = base + (np.fromiter(
+        ((WTYPE_BONUS if ITEM_WTYPE[r] == wq else (-WTYPE_PEN if ITEM_WTYPE[r] else 0.0))
+         for r in rows.tolist()), dtype=np.float32, count=len(rows)) if wq else 0.0)
+    # ★ 거리 임계: 개수를 채우지 말고 "가까운 것만" 남긴다. 개념 질의는 top1 대비 상대임계로 무관한 꼬리를 컷.
+    #   전체(슬롯 미지정)는 **슬롯별** top1 기준 → 한 슬롯이 전역을 독점해도 다른 슬롯 상위가 살아남음
+    #   (예: 전체 '스타킹'에서 바지뿐 아니라 한벌옷/신발 스타킹도). 이름매칭 항상 포함. 순수 색 질의는 컷 안 함.
+    if concept_words and len(rel):
+        keep = (nb > 0)
+        if has_slot:
+            keep = keep | (rel >= float(rel.max()) * DIST_RATIO)
+        else:
+            gtop = float(rel.max())
+            slot_arr = np.array([ITEMS[r]["slot"] for r in rows.tolist()])
+            for s in set(slot_arr.tolist()):
+                m = slot_arr == s
+                smax = float(rel[m].max())
+                if smax >= gtop * SLOT_GATE:   # 이 슬롯 최상위가 전역 최상위와 견줄 만할 때만 슬롯 포함
+                    keep = keep | (m & (rel >= smax * DIST_RATIO))    # 포함된 슬롯 안에서 상대임계
         if keep.any():
-            rows, base, nb = rows[keep], base[keep], nb[keep]
+            rows = rows[keep]
+            base = MAT[rows] @ qv
+            nb = np.maximum(name_bonus_for(rows, cleaned), name_bonus_for(rows, detect_gender(q)[1]))
     scores = base + NAME_BONUS * nb
-    # 남성 스타킹 후순위: '스타킹'류는 여성 연상어. 성별 지정이 없으면 남성(gender==0) 아이템을 소폭 감점해
-    # 검색 노출은 유지하되 여성/공용 아이템보다 아래로 내린다. (사용자 요구)
+    # 남성 스타킹 후순위: '스타킹'류는 여성 연상어. 성별 지정이 없으면 남성(gender==0) 아이템을 소폭 감점.
     if allowed_g is None and any(h in cleaned for h in ("스타킹", "타이츠", "팬티스타킹")):
         scores = scores - 0.05 * (GENDERS[rows] == 0)
-    # 헤어·성형: 신형(높은 ID) 완만 우대. 근접 구간에서만 순위에 영향.
+    # 헤어·성형: 신형(높은 ID) 완만 우대.
     scores = scores + ID_BONUS[rows]
-    # 색-매칭: 색은 2차. 개념+색 질의는 약하게(개념 매치 안에서 정색을 앞으로),
-    # 순수 색 질의("초록색")는 강하게. 대표색 계열 일치 가산, 불일치 감점(무채 포함).
+    # 무기 타입-매칭: 정체성=타입. 계열 일치 가산/불일치 감점(총→총류, 검→검류...).
+    if wq:
+        scores = scores + np.fromiter(
+            ((WTYPE_BONUS if ITEM_WTYPE[r] == wq else (-WTYPE_PEN if ITEM_WTYPE[r] else 0.0))
+             for r in rows.tolist()), dtype=np.float32, count=len(rows))
+    # 색-매칭: 색은 2차. 개념+색이면 약하게, 순수 색이면 강하게. 대표색 계열 일치 가산/불일치 감점.
     if qcolors:
         qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcolors])
         cb, cp = (COLOR_BONUS, COLOR_PEN) if color_strong else (0.08, 0.06)
