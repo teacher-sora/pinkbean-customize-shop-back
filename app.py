@@ -271,10 +271,12 @@ REFINE_SYSTEM = (
 # 부위를 가리키는 말은 words 에 남으면 임베딩을 오염시킨다(캡션엔 부위명이 안 들어있으므로).
 # LLM 이 가끔 slot 으로 빼놓고도 words 에 남겨서("스타킹 한벌옷") 결과가 망가졌다 → 코드로 확실히 제거.
 # 유추된 그 슬롯의 표현만 지운다(예: slot=longcoat 일 때만 '한벌옷' 제거) → 특징어를 잘못 지우지 않는다.
+# 임베딩에서 뺄 "순수 부위어"(캡션에 거의 안 쓰이는 카테고리 명칭)만. 원피스/드레스/바지/치마 같은
+# **형태를 지칭하는 말은 캡션 토큰이라 빼지 않는다**(빼면 '검정 원피스'가 '검정'만 남아 개념이 사라짐).
 SLOT_WORDS = {
     "hair": ("헤어", "머리"), "face": ("성형",), "cap": ("모자",), "faceAcc": ("얼굴장식",),
-    "eyeAcc": ("눈장식", "안경"), "coat": ("상의",), "longcoat": ("한벌옷", "원피스", "드레스"),
-    "pants": ("하의", "바지"), "shoes": ("신발",), "glove": ("장갑",), "cape": ("망토",),
+    "eyeAcc": ("눈장식", "안경"), "coat": ("상의",), "longcoat": (),
+    "pants": ("하의",), "shoes": ("신발",), "glove": ("장갑",), "cape": ("망토",),
     "weapon": ("무기",),
 }
 
@@ -393,10 +395,14 @@ async def search(req: SearchReq):
     qv = await embed_query(cleaned)
     t_embed = time.time() - t1
 
-    # 후보는 항상 스코프 안에서. 부위는 **사용자가 고른 것(req.slot)만** 하드 제한한다.
-    # 유추 슬롯(ref_slot)으로는 제한하지 않는다 — "전체"에서 '스타킹'을 치면 바지로 갇혀 한벌옷/신발
-    # 스타킹이 사라지던 문제 때문. 대신 전체 검색은 아래 슬롯-관련도 게이트로 관련 슬롯만 남긴다.
-    slot = req.slot if (req.slot and req.slot in SLOT_ROWS) else None
+    # 후보 부위: 사용자가 고른 것(req.slot) 우선, 없으면 질의에서 유추한 슬롯(ref_slot)으로 제한.
+    # ★ 단, 교차슬롯 개념(스타킹/타이츠/양말/니삭스)은 여러 슬롯에 걸쳐 있으므로 ref_slot 으로 가두지
+    #   않는다("전체 스타킹"이 바지로 갇혀 한벌옷/신발 스타킹이 사라지던 문제). 그 경우 전체+슬롯게이트.
+    _cross = any(c in cleaned or c in q for c in ("스타킹", "타이츠", "양말", "니삭스", "팬티스타킹"))
+    # 옷(상의/한벌옷/하의)은 슬롯으로 가두지 않는다 → 전체+슬롯게이트+한벌옷 가산으로 **한벌옷을 우선** 노출.
+    _clothing = ref_slot in ("coat", "longcoat", "pants")
+    slot = req.slot if (req.slot and req.slot in SLOT_ROWS) else (
+        ref_slot if (ref_slot and not _cross and not _clothing) else None)
     has_slot = bool(slot)
     rows = SLOT_ROWS[slot][SCOPE_MASK[SLOT_ROWS[slot]]] if has_slot else SCOPE_ROWS
     if allowed_g is not None:
@@ -437,6 +443,12 @@ async def search(req: SearchReq):
         scores = scores - 0.05 * (GENDERS[rows] == 0)
     # 헤어·성형: 신형(높은 ID) 완만 우대.
     scores = scores + ID_BONUS[rows]
+    # 전체(슬롯 미지정) 검색에서 옷 개념은 한벌옷을 소폭 우선(최근 신상·완성도 높은 아이템이 한벌옷 위주,
+    # 대체로 더 예쁨). 무관 질의('총' 등)의 한벌옷은 코사인이 낮아 이 가산으로도 위로 오지 않는다.
+    if not has_slot:
+        _lc = SLOT_ROWS.get("longcoat")
+        if _lc is not None:
+            scores = scores + 0.10 * np.isin(rows, _lc)
     # 무기 타입-매칭: 정체성=타입. 계열 일치 가산/불일치 감점(총→총류, 검→검류...).
     if wq:
         scores = scores + np.fromiter(
