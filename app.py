@@ -65,6 +65,79 @@ for i, it in enumerate(ITEMS):
 SLOT_ROWS = {k: np.asarray(v, dtype=np.int64) for k, v in SLOT_ROWS.items()}
 # 성별 = 아이템 "이름"의 접미 (여)/(남) 가 유일한 근거(build/from_transfer.py 에서 파생). 0남/1여/2공용.
 GENDERS = np.asarray([it.get("gender") if it.get("gender") is not None else 2 for it in ITEMS], dtype=np.int64)
+# 헤어·성형 저품질(저ID=구형 디자인) 완만 억제: 슬롯 내 ID를 0~1로 정규화해 높은 ID(신형)에 소폭 가산점.
+# 캡션 유사도가 우선이라 상한을 낮게 둔다(동점~근접 구간에서만 신형이 위로).
+ID_BONUS_MAX = 0.05
+ID_BONUS = np.zeros(len(ITEMS), dtype=np.float32)
+for _slot in ("hair", "face"):
+    _rows = SLOT_ROWS.get(_slot)
+    if _rows is None or len(_rows) == 0:
+        continue
+    try:
+        _ids = np.asarray([int(ITEMS[i]["id"]) for i in _rows], dtype=np.float64)
+    except (TypeError, ValueError):
+        continue
+    _lo, _hi = _ids.min(), _ids.max()
+    if _hi > _lo:
+        ID_BONUS[_rows] = (ID_BONUS_MAX * (_ids - _lo) / (_hi - _lo)).astype(np.float32)
+
+# ── 색-매칭 점수 ────────────────────────────────────────────────────
+# 질의에 색이 있으면 아이템 "대표색"(아이콘 픽셀 면적최다색; 없으면 캡션 첫 색토큰)이
+# 질의색 계열이면 가산, 아니면 감점. 임베딩이 색을 잘 못 가르는 걸 보정.
+COLOR_CANON = {
+    '빨강': '빨강', '빨간': '빨강', '붉은': '빨강', '레드': '빨강',
+    '주황': '주황', '오렌지': '주황', '갈색': '갈색', '브라운': '갈색',
+    '노랑': '노랑', '노란': '노랑', '옐로': '노랑',
+    '연두': '연두', '초록': '초록', '녹색': '초록', '그린': '초록',
+    '청록': '청록', '민트': '청록',
+    '파랑': '파랑', '파란': '파랑', '푸른': '파랑', '블루': '파랑',
+    '하늘': '하늘색', '하늘색': '하늘색', '하늘빛': '하늘색',
+    '남색': '남색', '네이비': '남색',
+    '보라': '보라', '보라색': '보라', '퍼플': '보라', '자주': '자주색', '자주색': '자주색',
+    '분홍': '분홍', '분홍색': '분홍', '핑크': '분홍',
+    '검정': '검정', '검은': '검정', '까만': '검정', '블랙': '검정',
+    '하양': '흰색', '하얀': '흰색', '흰': '흰색', '흰색': '흰색', '화이트': '흰색',
+    '회색': '회색', '그레이': '회색', '베이지': '베이지색', '베이지색': '베이지색',
+}
+_FAMILY = {
+    '빨강': {'빨강', '분홍', '자주색'}, '분홍': {'분홍', '빨강', '자주색'}, '자주색': {'자주색', '보라', '빨강'},
+    '주황': {'주황', '갈색', '노랑'}, '갈색': {'갈색', '주황'}, '노랑': {'노랑', '주황', '연두'},
+    '연두': {'연두', '초록', '노랑'}, '초록': {'초록', '연두', '청록'}, '청록': {'청록', '초록', '파랑', '하늘색'},
+    '파랑': {'파랑', '하늘색', '남색', '청록'}, '하늘색': {'하늘색', '파랑', '청록'}, '남색': {'남색', '파랑', '보라'},
+    '보라': {'보라', '자주색', '남색'},
+    '검정': {'검정', '회색'}, '흰색': {'흰색', '회색', '베이지색'}, '회색': {'회색', '검정', '흰색'},
+    '베이지색': {'베이지색', '흰색', '갈색'},
+}
+
+
+def canon_colors(text: str) -> set:
+    return {c for tok, c in COLOR_CANON.items() if tok in (text or "")}
+
+
+# 아이템 대표색: item_colors.json(아이콘 면적최다색, ratio>=0.28) 우선, 없으면 캡션 첫 색토큰.
+try:
+    with open(os.path.join(DATA, "item_colors.json"), "r", encoding="utf-8") as f:
+        _ITEM_COLORS = json.load(f)
+except (OSError, ValueError):
+    _ITEM_COLORS = {}
+
+
+def _primary_color(it):
+    c = _ITEM_COLORS.get(it["id"]) or {}
+    if c.get("ratio", 0) >= 0.28:
+        return c.get("dom")
+    for w in (it.get("words") or []):
+        cc = canon_colors(w)
+        if cc:
+            return next(iter(cc))
+    return None
+
+
+ITEM_PRIMARY = [_primary_color(it) for it in ITEMS]
+COLOR_BONUS, COLOR_PEN = 0.15, 0.12
+# 거리 임계: 개념 질의에서 top1 코사인의 이 비율 미만인 후보는 "무관"으로 컷(개수 채우기 방지).
+# 쿼리마다 코사인 절대값이 달라 상대비율이 안전. 0.72 = 최상위와 비슷하게 가까운 것만 남김.
+DIST_RATIO = 0.72
 # 검색 스코프(2026-07-17 확정): 아래 12개 슬롯만. earring(귀고리)·shield(방패)·skin(피부)는
 # 착용해도 거의 안 보여 검색 방해라 제외. 스코프는 build/from_transfer.py 가 이미 강제하지만,
 # 잘못된 데이터가 들어와도 스코프 밖이 새어나오지 않도록 방어적으로 한 번 더 건다.
@@ -161,6 +234,7 @@ SLOT_WORDS = {
 async def refine_query(q: str):
     """문장 → (words, slot|None, gender|None). 실패하면 None (호출부가 규칙 기반으로 폴백)."""
     try:
+        q_sorted = " ".join(sorted(q.split()))  # 어순 불변: 정렬해 LLM 입력을 정규화("여자 단발 헤어"="헤어 여자 단발")
         async with httpx.AsyncClient(timeout=6.0) as client:
             r = await client.post(
                 f"{DASHSCOPE_BASE}/chat/completions",
@@ -168,7 +242,7 @@ async def refine_query(q: str):
                 json={
                     "model": REFINE_MODEL,
                     "messages": [{"role": "system", "content": REFINE_SYSTEM},
-                                 {"role": "user", "content": q}],
+                                 {"role": "user", "content": q_sorted}],
                     "response_format": {"type": "json_object"},
                     "temperature": 0,
                     "max_tokens": 200,
@@ -254,10 +328,17 @@ async def search(req: SearchReq):
     ref = await refine_query(q)
     if ref:
         words, ref_slot, allowed_g = ref
-        cleaned = " ".join(words)
     else:
         ref_slot = None
-        allowed_g, cleaned = detect_gender(q)  # 폴백: 성별 토큰만 제거
+        allowed_g, _cq = detect_gender(q)  # 폴백: 성별 토큰만 제거
+        words = _cq.split()
+    # 정체성 = 개념(명사)이지 색이 아니다. 임베딩은 **색을 뺀 개념**만으로 → 색이 개념을 덮지 않게.
+    # 색은 아래에서 개념 매치 안의 2차 재정렬로만 반영. 어순 불변을 위해 정렬해 임베딩.
+    qcolors = canon_colors(" ".join(words)) | canon_colors(q)
+    concept_words = [w for w in words if not canon_colors(w)]
+    embed_words = concept_words or words           # 순수 색 질의면 색 자체로 임베딩
+    cleaned = " ".join(sorted(embed_words))
+    color_strong = not concept_words               # 개념 없이 색만 → 색 강하게
     t_refine = time.time() - t0
 
     t1 = time.time()
@@ -275,8 +356,34 @@ async def search(req: SearchReq):
         return {"query": q, "slot": slot, "count": 0, "results": []}
     # 점수 = 캡션 벡터 코사인 + 이름 부분일치 가산점 (검색 근거는 이 둘뿐)
     # 이름은 정제문·원문 **둘 다**로 본다 — 정제가 이름을 쪼개거나 부위를 떼어내도 이름 검색이 죽지 않도록.
+    base = MAT[rows] @ qv  # 순수 개념 코사인(거리)
     nb = np.maximum(name_bonus_for(rows, cleaned), name_bonus_for(rows, detect_gender(q)[1]))
-    scores = MAT[rows] @ qv + NAME_BONUS * nb
+    # ★ 거리 임계: 개수를 채우지 말고 "가까운 것만" 남긴다. 개념 질의는 top1 대비 상대임계로
+    #   무관한 꼬리를 컷(쿼리마다 코사인 절대값이 달라 상대값이 안전). 이름매칭은 항상 포함.
+    #   순수 색 질의("초록색")는 개념이 없으니 컷하지 않고 색 점수로만 정렬.
+    if concept_words and len(base):
+        top1 = float(base.max())
+        keep = (base >= top1 * DIST_RATIO) | (nb > 0)
+        if keep.any():
+            rows, base, nb = rows[keep], base[keep], nb[keep]
+    scores = base + NAME_BONUS * nb
+    # 남성 스타킹 후순위: '스타킹'류는 여성 연상어. 성별 지정이 없으면 남성(gender==0) 아이템을 소폭 감점해
+    # 검색 노출은 유지하되 여성/공용 아이템보다 아래로 내린다. (사용자 요구)
+    if allowed_g is None and any(h in cleaned for h in ("스타킹", "타이츠", "팬티스타킹")):
+        scores = scores - 0.05 * (GENDERS[rows] == 0)
+    # 헤어·성형: 신형(높은 ID) 완만 우대. 근접 구간에서만 순위에 영향.
+    scores = scores + ID_BONUS[rows]
+    # 색-매칭: 색은 2차. 개념+색 질의는 약하게(개념 매치 안에서 정색을 앞으로),
+    # 순수 색 질의("초록색")는 강하게. 대표색 계열 일치 가산, 불일치 감점(무채 포함).
+    if qcolors:
+        qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcolors])
+        cb, cp = (COLOR_BONUS, COLOR_PEN) if color_strong else (0.08, 0.06)
+        adj = np.fromiter(
+            ((cb if (ITEM_PRIMARY[r] in qfam) else (-cp if ITEM_PRIMARY[r] else 0.0))
+             for r in rows.tolist()),
+            dtype=np.float32, count=len(rows),
+        )
+        scores = scores + adj
     k = min(req.topK, len(rows))
     order = np.argsort(-scores)[:k]
     top, top_scores = rows[order], scores[order]
