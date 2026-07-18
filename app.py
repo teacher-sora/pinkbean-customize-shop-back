@@ -400,6 +400,50 @@ def health():
             "slots": {k: int(len(v)) for k, v in SLOT_ROWS.items()}}
 
 
+# ── 부정어(제외) 처리 ────────────────────────────────────────────────
+# "묶음 없고", "리본 없는" 처럼 특정 특징을 **빼달라는** 질의. 임베딩은 부정을 표현 못 하고(오히려 그 단어가
+# 들어간 걸 끌어온다), 캡션이 "장발 트윈테일 끝 컬"이면 '장발 컬' 질의에 트윈테일이 딸려온다.
+# → 부정어를 코드로 파싱해 **그 특징을 가진 아이템을 후보에서 아예 제외**한다.
+_NEG_MARKERS = ("없는", "없고", "없이", "없음", "않은", "않는", "아닌", "빼고", "제외", "말고")
+# 묶음류는 캡션 토큰이 여러 형태(트윈테일/포니테일/번/당고…)라 계열로 확장한다. 나머지는 낱말 그대로 제외.
+_NEG_TIE = ("묶음", "묶은", "포니테일", "포니", "트윈테일", "트윈", "양갈래", "당고", "올림머리", "올림", "땋", "반묶", "번", "꽁지")
+_NEG_FAMILY = {"묶음": _NEG_TIE, "묶은": _NEG_TIE, "묶": _NEG_TIE, "트윈": _NEG_TIE, "포니": _NEG_TIE}
+
+
+def parse_negatives(q: str):
+    """원문에서 '<특징> 없고/없는/아닌…' 의 <특징> 들을 뽑는다."""
+    out = []
+    toks = (q or "").split()
+    for i, t in enumerate(toks):
+        for m in _NEG_MARKERS:
+            if t == m:
+                if i > 0:
+                    out.append(toks[i - 1])
+            elif t.endswith(m) and len(t) > len(m):
+                out.append(t[: -len(m)])
+    return out
+
+
+def neg_exclude_tokens(negs):
+    ex = set()
+    for term in negs:
+        fam = None
+        for k, f in _NEG_FAMILY.items():
+            if k in term:
+                fam = f
+                break
+        ex.update(fam if fam else (term,))
+    return ex
+
+
+def _item_negated(it, ex) -> bool:
+    subs = set()
+    for w in (it.get("words") or []):
+        for s in w.split():
+            subs.add(s)
+    return any(any(tok in s for s in subs) for tok in ex)
+
+
 @app.post("/search")
 async def search(req: SearchReq):
     q = (req.query or "").strip()
@@ -414,6 +458,12 @@ async def search(req: SearchReq):
         ref_slot = None
         allowed_g, _cq = detect_gender(q)  # 폴백: 성별 토큰만 제거
         words = _cq.split()
+    # 부정어(제외): 원문에서 '<특징> 없고' 파싱 → 긍정 임베딩에서 그 특징/마커를 빼고, 제외토큰 집합을 만든다.
+    neg_terms = parse_negatives(q)
+    neg_ex = neg_exclude_tokens(neg_terms) if neg_terms else set()
+    if neg_terms:
+        _drop = set(neg_terms) | set(_NEG_MARKERS)
+        words = [w for w in words if w not in _drop and not any(w.endswith(m) for m in _NEG_MARKERS)]
     # 정체성 = 개념(명사)이지 색이 아니다. 임베딩은 **색을 뺀 개념**만으로 → 색이 개념을 덮지 않게.
     # 색은 아래에서 개념 매치 안의 2차 재정렬로만 반영. 어순 불변을 위해 정렬해 임베딩.
     qcolors = canon_colors(" ".join(words)) | canon_colors(q)
@@ -439,6 +489,9 @@ async def search(req: SearchReq):
     rows = SLOT_ROWS[slot][SCOPE_MASK[SLOT_ROWS[slot]]] if has_slot else SCOPE_ROWS
     if allowed_g is not None:
         rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
+    # 부정어 제외: 해당 특징(계열 포함)을 가진 아이템은 후보에서 제거(트윈테일 등 묶음류 아웃).
+    if neg_ex and len(rows):
+        rows = rows[np.fromiter((not _item_negated(ITEMS[r], neg_ex) for r in rows.tolist()), dtype=bool, count=len(rows))]
     if len(rows) == 0:
         return {"query": q, "slot": slot, "count": 0, "results": []}
     # 점수 = 캡션 벡터 코사인 + 이름 부분일치 가산점 (검색 근거는 이 둘뿐)
