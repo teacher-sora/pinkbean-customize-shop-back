@@ -186,6 +186,38 @@ def weapon_query_type(text: str):
 
 ITEM_WTYPE = [_weapon_type(it) for it in ITEMS]
 WTYPE_BONUS, WTYPE_PEN = 0.20, 0.15
+
+# ── 동물 귀 폼-매칭 점수 ─────────────────────────────────────────────
+# "동물 귀" 는 임베딩에서 '동물' 이 지배해 동물 옷/무기가 올라오고, 정작 귀(=모자 슬롯 머리띠)가 묻힌다.
+# 실측: 캡션 토큰 "동물 귀" 136건 등 귀 형태 아이템 334건이 전부 cap 슬롯. 귀 = 형태 정체성이므로
+# 무기 타입과 같은 패턴으로, 귀 질의 시 '캡션에 귀 토큰이 있는 모자'를 강하게 가산하고 그 외는 감점한다.
+_EAR_ITEM_EXCLUDE = ("귀걸이", "귀고리", "귀여", "잎사귀")
+
+
+def _is_ear_item(it):
+    if it.get("slot") != "cap":  # 귀 형태 = 모자 슬롯 머리띠. 동물 옷(한벌옷)은 '귀'가 있어도 제외.
+        return False
+    for w in (it.get("words") or []):
+        if "귀" in w and not any(x in w for x in _EAR_ITEM_EXCLUDE):
+            return True
+    return False
+
+
+ITEM_EAR = np.asarray([_is_ear_item(it) for it in ITEMS], dtype=bool)
+EAR_BONUS, EAR_PEN = 0.25, 0.12
+# 귀 질의 감지: 홀로 선 '귀' 토큰(예: "동물 귀", "고양이 귀", "귀 머리띠"). 귀걸이/귀여운/귀신/까마귀 등 오탐 제외.
+_EAR_Q_EXCLUDE = ("귀걸이", "귀고리", "귀여", "귀신", "귀족", "귀환", "귀가", "귀중", "잎사귀", "까마귀", "당나귀")
+
+
+def ear_query(text: str) -> bool:
+    for t in (text or "").split():
+        if t == "귀":
+            return True
+        if t.endswith("귀") and len(t) <= 4 and not any(x in t for x in _EAR_Q_EXCLUDE):
+            return True
+    return False
+
+
 # 검색 스코프(2026-07-17 확정): 아래 12개 슬롯만. earring(귀고리)·shield(방패)·skin(피부)는
 # 착용해도 거의 안 보여 검색 방해라 제외. 스코프는 build/from_transfer.py 가 이미 강제하지만,
 # 잘못된 데이터가 들어와도 스코프 밖이 새어나오지 않도록 방어적으로 한 번 더 건다.
@@ -418,6 +450,10 @@ async def search(req: SearchReq):
     rel = base + (np.fromiter(
         ((WTYPE_BONUS if ITEM_WTYPE[r] == wq else (-WTYPE_PEN if ITEM_WTYPE[r] else 0.0))
          for r in rows.tolist()), dtype=np.float32, count=len(rows)) if wq else 0.0)
+    # 동물 귀 폼-매칭도 관련도에 미리 반영: '동물' 지배에 묻힌 귀(모자)가 거리컷에 잘리지 않게 미리 끌어올린다.
+    eq = ear_query(cleaned) or ear_query(q)
+    if eq and len(rel):
+        rel = rel + np.where(ITEM_EAR[rows], EAR_BONUS, -EAR_PEN).astype(np.float32)
     # ★ 거리 임계: 개수를 채우지 말고 "가까운 것만" 남긴다. 개념 질의는 top1 대비 상대임계로 무관한 꼬리를 컷.
     #   전체(슬롯 미지정)는 **슬롯별** top1 기준 → 한 슬롯이 전역을 독점해도 다른 슬롯 상위가 살아남음
     #   (예: 전체 '스타킹'에서 바지뿐 아니라 한벌옷/신발 스타킹도). 이름매칭 항상 포함. 순수 색 질의는 컷 안 함.
@@ -454,6 +490,9 @@ async def search(req: SearchReq):
         scores = scores + np.fromiter(
             ((WTYPE_BONUS if ITEM_WTYPE[r] == wq else (-WTYPE_PEN if ITEM_WTYPE[r] else 0.0))
              for r in rows.tolist()), dtype=np.float32, count=len(rows))
+    # 동물 귀 폼-매칭: 형태 정체성. 귀(모자) 가산 / 그 외 감점 → "동물 옷/무기"가 아니라 귀가 위로 온다.
+    if eq:
+        scores = scores + np.where(ITEM_EAR[rows], EAR_BONUS, -EAR_PEN).astype(np.float32)
     # 색-매칭: 색은 2차. 개념+색이면 약하게, 순수 색이면 강하게. 대표색 계열 일치 가산/불일치 감점.
     if qcolors:
         qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcolors])
