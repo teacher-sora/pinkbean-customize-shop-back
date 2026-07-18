@@ -69,17 +69,21 @@ GENDERS = np.asarray([it.get("gender") if it.get("gender") is not None else 2 fo
 # 캡션 유사도가 우선이라 상한을 낮게 둔다(동점~근접 구간에서만 신형이 위로).
 ID_BONUS_MAX = 0.05
 ID_BONUS = np.zeros(len(ITEMS), dtype=np.float32)
-for _slot in ("hair", "face"):
+# 신형(높은 ID) 완만 우대. **순위(백분위)** 정규화 → ID 간격이 들쭉날쭉하거나 이상치(무기: 대부분
+# 170xxxx인데 투명블레이드 134xxxx)가 있어도 왜곡 없이 오래된(낮은 ID) 아이템을 확실히 아래로.
+# hair/face/weapon 적용(구형 절판 무기 '장난감 총'·'모형 라이플' 후순위화).
+for _slot in ("hair", "face", "weapon"):
     _rows = SLOT_ROWS.get(_slot)
-    if _rows is None or len(_rows) == 0:
+    if _rows is None or len(_rows) < 2:
         continue
     try:
-        _ids = np.asarray([int(ITEMS[i]["id"]) for i in _rows], dtype=np.float64)
+        _ids = [int(ITEMS[i]["id"]) for i in _rows.tolist()]
     except (TypeError, ValueError):
         continue
-    _lo, _hi = _ids.min(), _ids.max()
-    if _hi > _lo:
-        ID_BONUS[_rows] = (ID_BONUS_MAX * (_ids - _lo) / (_hi - _lo)).astype(np.float32)
+    _order = sorted(range(len(_rows)), key=lambda k: _ids[k])
+    _n = len(_rows)
+    for _rank, _k in enumerate(_order):
+        ID_BONUS[_rows[_k]] = np.float32(ID_BONUS_MAX * _rank / (_n - 1))
 
 # ── 색-매칭 점수 ────────────────────────────────────────────────────
 # 질의에 색이 있으면 아이템 "대표색"(아이콘 픽셀 면적최다색; 없으면 캡션 첫 색토큰)이
@@ -338,7 +342,7 @@ app.add_middleware(
 class SearchReq(BaseModel):
     query: str
     slot: str | None = None      # 특정 슬롯(hair/cap/weapon...)만 검색. None=전체
-    topK: int = 60
+    topK: int = 100
 
 
 async def embed_query(text: str) -> np.ndarray:
