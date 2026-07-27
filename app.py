@@ -404,24 +404,28 @@ def health():
 # ── 이미지 → 헤어 검색(코스프레) ─────────────────────────────────────
 # 참고 이미지를 Qwen3 VL(통제 어휘 프롬프트)로 읽어 헤어 키워드를 뽑고, 기존 텍스트 검색을 재사용.
 # 색은 염색 가능하므로 형태 우선(검색 파이프라인이 색을 2차 재정렬로만 반영). 프론트 업로드시 긴 변 1024 이하 권장.
-VL_MODEL = os.environ.get("VL_MODEL", "qwen3-vl-plus")
-# 단일 호출로 (a) 자세한 한 문장 서술 + (b) 통제어휘 토큰을 동시 출력 → 문장 dense + 토큰 집합매칭 융합.
-# ★ 색은 판단에서 제외(한벌옷 HSB·부분염색 대응) → 색을 아예 언급하지 않게 한다. 형태만.
-HAIR_VL_PROMPT = (
-    "참고 이미지의 머리카락(헤어)만 보고 아래 JSON 객체 하나로만 답하라. "
-    "옷·얼굴·눈·배경·안경·모자·왕관·동물귀·후광은 완전히 무시한다. **색은 절대 언급하지 마라(형태만).**\n\n"
-    "묶은 형태 구분:\n"
-    " · 상투 = 머리를 둥글게 뭉쳐 얹은 덩어리(경단). 위치: 높은 상투/낮은 상투/한쪽 상투/양쪽 상투\n"
-    " · 포니테일 = 하나로 묶어 늘어뜨림: 높은/낮은/사이드 포니테일\n"
-    " · 양갈래 = 좌우 둘로 나눠 묶음(트윈테일) · 땋은 머리 = 땋기(양갈래로 땋으면 '양갈래'+'땋은 머리')\n"
-    " · 반묶음 = 윗머리 절반만 묶음. (그냥 흐르거나 볼륨만 큰 건 묶음 아님)\n\n"
-    "{\n"
-    '  "desc": "머리 모양을 한국어 한 문장으로 자세히: 길이(짧은 머리/단발/중단발/장발), 묶은 형태와 위치, '
-    "결(생머리/웨이브/곱슬/굵은 컬/볼륨), 앞머리, 머리에 달린 장식. 색은 빼고 형태만.\",\n"
-    '  "words": ["위 특징을 명사 키워드로 4~9개. 길이 1개 필수 + 묶은 형태 + 결 + 앞머리 + 장식. 색 토큰 금지."]\n'
-    "}\n"
-    "부정문 금지, 색 금지. JSON 객체 하나만 출력."
-)
+VL_MODEL = os.environ.get("VL_MODEL", "qwen3-vl-flash")   # Flash 다중호출(비용 < Plus 1회)
+# 구조화 파이프라인: 구조(길이+묶음) 3회 투표 + 땋기 확인 + 결/앞머리/장식. 색은 판단에서 완전 제외.
+_CHECK = (
+    "참고 이미지의 머리카락을 자세히 보고 JSON 하나로만. 색 무시.\n"
+    '{"length":"짧은 머리|단발|중단발|장발", "tie":"..."}\n'
+    "tie 는 아래 중 실제 모양과 가장 잘 맞는 것 딱 하나:\n"
+    ' "안 묶음"(묶은 데 없이 그냥 풀어 내림) / "한쪽 상투"(한쪽 위에 둥글게 뭉친 덩어리 하나) / "양쪽 상투"(양쪽 위에 덩어리 둘) /\n'
+    ' "사이드 포니테일"(한쪽으로 모아 묶어 아래로 늘어뜨림) / "포니테일"(뒤로 하나로 모아 묶음) /\n'
+    ' "양갈래"(좌우 대칭으로 두 갈래로 갈라 길게) / "반묶음"(윗머리 일부만 위로 묶고 아래는 풀어내림).\n'
+    '머리 위나 옆에 뭉친 덩어리·묶은 흔적이 보이면 "안 묶음"이 아니다. tie 딱 하나만. JSON 하나만.')
+_BRAID = "참고 이미지 머리에서 머리 갈래가 눈에 띄게 세 가닥으로 꼬여 땋여 있는가? \"예\" 또는 \"아니오\" 한 단어만."
+_DETAIL = (
+    "참고 이미지 머리카락의 결과 앞머리와 머리 장식만 한국어 단어로. 색·길이·묶음 제외.\n"
+    "결(생머리/웨이브/굵은 컬/곱슬/볼륨/링렛), 앞머리(일자 앞머리/시스루 앞머리/눈 덮는 앞머리/사이드 스웹), 장식(방울/구슬/핀/꽃/리본/뿔).\n"
+    '반드시 문자열 배열 하나로만. 예: ["웨이브","일자 앞머리","방울"]')
+# 묶음 계열 브리징: Flash 용어를 캡션의 인접 용어에도 약하게 매칭(반묶음↔상투 등)
+_TIE_FAM = {"반묶음": [("상투",0.65),("한쪽 상투",0.5),("높은 상투",0.5)],
+            "한쪽 상투": [("높은 한쪽 상투",0.9),("상투",0.8),("반묶음",0.4)],
+            "양쪽 상투": [("상투",0.7),("양갈래",0.3)],
+            "사이드 포니테일": [("한쪽 상투",0.35),("포니테일",0.6),("한쪽 묶음",0.6)],
+            "포니테일": [("높은 포니테일",0.6),("낮은 포니테일",0.5)],
+            "양갈래": [("양쪽 상투",0.3)]}
 
 
 class ImgSearchReq(BaseModel):
@@ -499,31 +503,57 @@ def _canon_hair_token(t: str) -> str:
 import asyncio
 
 
-async def qwen_vl_hair(image: str, temperature: float = 0.2) -> tuple[str, list[str]]:
-    """참고 이미지 → (서술문 desc, 토큰 words). 단일 호출."""
+async def _flash(client, sysp: str, image: str, temperature: float, mx: int = 160) -> str:
+    r = await client.post(
+        f"{DASHSCOPE_BASE}/chat/completions",
+        headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+        json={"model": VL_MODEL, "temperature": temperature, "max_tokens": mx,
+              "messages": [{"role": "system", "content": sysp},
+                           {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image}},
+                                                        {"type": "text", "text": "응답."}]}]})
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+
+async def qwen_vl_hair(image: str) -> tuple[list[str], dict]:
+    """참고 이미지 → (토큰, 토큰별 가중). 구조 3회 투표 + 땋기 + 디테일(모두 병렬). 색 미사용."""
+    from collections import Counter
     async with httpx.AsyncClient(timeout=60.0) as client:
-        r = await client.post(
-            f"{DASHSCOPE_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
-            json={"model": VL_MODEL, "temperature": temperature, "max_tokens": 300,
-                  "messages": [
-                      {"role": "system", "content": HAIR_VL_PROMPT},
-                      {"role": "user", "content": [
-                          {"type": "image_url", "image_url": {"url": image}},
-                          {"type": "text", "text": "JSON 객체 하나로만."}]}]},
-        )
-        r.raise_for_status()
-        c = r.json()["choices"][0]["message"]["content"]
-    m = re.search(r"\{.*\}", c, re.S)
-    if not m:
-        return "", []
-    try:
-        d = json.loads(m.group(0))
-    except ValueError:
-        return "", []
-    desc = str(d.get("desc") or "").strip()
-    words = [re.sub(r"\s*\(.*?\)", "", str(t)).strip() for t in (d.get("words") or []) if str(t).strip()]
-    return desc, words
+        outs = await asyncio.gather(
+            _flash(client, _CHECK, image, 0.1), _flash(client, _CHECK, image, 0.5),
+            _flash(client, _CHECK, image, 0.9), _flash(client, _BRAID, image, 0.2),
+            _flash(client, _DETAIL, image, 0.3), return_exceptions=True)
+    lens, ties = Counter(), Counter()
+    for c in outs[:3]:
+        if not isinstance(c, str): continue
+        m = re.search(r"\{.*\}", c, re.S)
+        if not m: continue
+        try: d = json.loads(m.group(0))
+        except ValueError: continue
+        L = str(d.get("length") or "").strip()
+        if L: lens[L] += 1
+        ties[str(d.get("tie") or "안 묶음").strip()] += 1
+    braid = isinstance(outs[3], str) and "예" in outs[3]
+    det = []
+    if isinstance(outs[4], str):
+        mm = re.search(r"\[.*\]", outs[4], re.S)
+        if mm:
+            try: det = [re.sub(r"\s*\(.*?\)", "", str(t)).strip() for t in json.loads(mm.group(0)) if str(t).strip()]
+            except ValueError: det = []
+    toks, votes = [], {}
+    if lens:
+        L = lens.most_common(1)[0][0]; toks.append(L); votes[L] = 1.0
+    tie, tv = (ties.most_common(1)[0] if ties else ("안 묶음", 0))
+    conf = tv / max(sum(ties.values()), 1)
+    if tie != "안 묶음" and tv >= 2:                       # 3표 중 2표 이상 합의할 때만 채택(거짓 묶음 억제)
+        toks.append(tie); votes[tie] = conf
+        for w, wt in _TIE_FAM.get(tie, []):
+            if w not in votes: toks.append(w); votes[w] = conf * wt
+    if braid:
+        toks.append("땋은 머리"); votes["땋은 머리"] = 1.0 if "양갈래" in toks else 0.7
+    for d in det:
+        if d not in votes: toks.append(d); votes[d] = 0.7
+    return toks, votes
 
 _ORN_KW = ("방울", "구슬", "리본", "핀", "꽃", "브릿지", "하이라이트", "장식", "나비", "별", "상투", "포니", "묶음", "양갈래", "번", "땋")
 
@@ -547,54 +577,41 @@ def _rrf_fuse(scoreA: np.ndarray, scoreB: np.ndarray, k: int = 60) -> np.ndarray
 
 @app.post("/img_search")
 async def img_search(req: ImgSearchReq):
-    """이미지 → (Qwen VL 1회: 서술문+토큰) → 토큰 집합매칭 ⊕ 문장 dense 융합(RRF). 색 미사용."""
+    """이미지 → Flash 구조화 파이프라인(구조 3표+땋기+디테일, 병렬) → 토큰 집합매칭. 색 미사용."""
     if not req.image:
         return {"count": 0, "results": [], "extractedWords": []}
     t0 = time.time()
     try:
-        desc, words = await qwen_vl_hair(req.image)
+        words, votes = await qwen_vl_hair(req.image)
     except Exception as e:
         return {"count": 0, "results": [], "extractedWords": [], "error": f"vl:{type(e).__name__}"}
-    if not words and not desc:
+    if not words:
         return {"count": 0, "results": [], "extractedWords": [], "error": "no-words"}
-    form_words = _form_first(words) if words else []
+    form_words = _form_first(words)
     t_vl = time.time() - t0
 
     if req.slot == "hair" and _HTOK is not None:
-        # (A) 토큰 집합매칭 — Qwen 용어를 캡션 어휘로 정규화(번→상투 등), 색 제외.
-        scT = None
-        if form_words:
-            canon_words = [_canon_hair_token(w) for w in form_words]
-            Q = await _embed_many(canon_words)
-            scT = _setmatch_scores(Q)
-        # (B) 문장 dense — 서술문 임베딩 vs 헤어 평균벡터.
-        scS = None
-        if desc:
-            qs = await embed_query(desc)
-            scS = _HMAT @ qs
-        # 융합(RRF). 한쪽만 있으면 그것만.
-        if scT is not None and scS is not None:
-            fused = _rrf_fuse(scT, scS)
-        elif scT is not None:
-            fused = scT
-        else:
-            fused = scS
+        canon_words = [_canon_hair_token(w) for w in form_words]        # 번→상투 등 캡션 어휘 정규화
+        cvotes = {_canon_hair_token(w): votes.get(w, 0.7) for w in form_words}
+        Q = await _embed_many(canon_words)
+        vw = np.asarray([cvotes.get(w, 0.7) for w in canon_words], dtype=np.float32)
+        scores = _setmatch_scores(Q, vw)
         k = min(req.topK, _H_N)
-        order = np.argsort(-fused)[:k].tolist()
+        order = np.argsort(-scores)[:k].tolist()
         results = []
         for j in order:
             it = ITEMS[_H_ROW[j]]
             results.append({"id": it["id"], "slot": it["slot"], "name": it["name"],
                             "label": it.get("label"), "isCash": it.get("isCash"), "gender": it.get("gender"),
                             "words": it.get("words") or [], "tier": it.get("tier"),
-                            "score": round(float(fused[j]), 6)})
+                            "score": round(float(scores[j]), 6)})
         return {"slot": "hair", "count": len(results), "extractedWords": words,
-                "formWords": form_words, "desc": desc, "canonWords": [_canon_hair_token(w) for w in form_words],
+                "canonWords": canon_words,
                 "ms": {"vl": round(t_vl * 1000), "total": round((time.time() - t0) * 1000)},
                 "results": results}
 
-    res = await search(SearchReq(query="", words=form_words or words, slot=req.slot, topK=req.topK))
-    res["extractedWords"] = words; res["desc"] = desc
+    res = await search(SearchReq(query="", words=form_words, slot=req.slot, topK=req.topK))
+    res["extractedWords"] = words
     res["ms"] = {**res.get("ms", {}), "vl": round(t_vl * 1000)}
     return res
 
