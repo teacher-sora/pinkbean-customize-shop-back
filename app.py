@@ -405,15 +405,22 @@ def health():
 # 참고 이미지를 Qwen3 VL(통제 어휘 프롬프트)로 읽어 헤어 키워드를 뽑고, 기존 텍스트 검색을 재사용.
 # 색은 염색 가능하므로 형태 우선(검색 파이프라인이 색을 2차 재정렬로만 반영). 프론트 업로드시 긴 변 1024 이하 권장.
 VL_MODEL = os.environ.get("VL_MODEL", "qwen3-vl-plus")
+# 캡션 어휘와 정확히 일치하는 통제어휘 + 묶음 형태 세분(상투/포니테일/양갈래/반묶음 구분 정의).
 HAIR_VL_PROMPT = (
     "참고 이미지의 머리카락만 보고, 아래 목록의 단어만 골라 JSON 배열로 출력한다. 목록에 없는 단어 금지.\n"
-    "옷·얼굴·눈·배경·안경·모자·왕관·동물귀·후광·머리 위 소품은 완전히 무시한다.\n\n"
-    "[길이] 정확히 1개 필수 — 짧은 머리 / 단발 / 중단발 / 장발 (어깨 위=짧은 머리, 어깨=단발, 쇄골=중단발, 가슴 아래=장발)\n"
+    "옷·얼굴·눈·배경·안경·모자·왕관·동물귀·후광은 완전히 무시.\n\n"
+    "[길이] 정확히 1개 필수 — 짧은 머리(어깨 위) / 단발(어깨) / 중단발(쇄골) / 장발(가슴 아래)\n"
     "[결] 1~2개 필수 — 생머리 / 웨이브 / 굵은 컬 / 곱슬 / 볼륨 / 스파이크\n"
-    "[묶음] 고무줄로 묶어 잘록한 매듭이 또렷할 때만. 머리가 한쪽으로 흐르거나 볼륨만 큰 건 묶음이 아님. 애매하면 생략 — 한쪽 묶음 / 양갈래 / 포니테일 / 상투 / 반묶음\n"
-    "[장식] 머리카락에 확실히 붙어있는 별개 물체만. 추측 금지, 없으면 생략. \"색+종류\"로 — 빨간 방울 / 분홍 꽃 / 흰 구슬 / 검은 핀 / 은색 브릿지\n"
-    "[색] 정확히 1개 필수 — 검정 / 갈색 / 금색 / 은발 / 은회색 / 흰색 / 분홍 / 빨강 / 파랑 / 라벤더 / 보라 / 초록 / 남색 / 주황\n\n"
-    "순서: 길이 → 결 → (묶음) → (장식) → 색. 확신 없는 항목은 넣지 마라. 총 3~6개. JSON 문자열 배열로만."
+    "[묶은 형태] 실제로 묶었을 때만, 형태를 정확히 구분해서 1~2개:\n"
+    "   · 상투 = 머리를 둥글게 뭉쳐 얹은 덩어리(경단). 위치까지: 높은 상투 / 낮은 상투 / 한쪽 상투 / 양쪽 상투\n"
+    "   · 포니테일 = 하나로 묶어 길게 늘어뜨림: 높은 포니테일 / 낮은 포니테일 / 사이드 포니테일\n"
+    "   · 양갈래 = 좌우 둘로 나눠 묶음(트윈테일)\n"
+    "   · 반묶음 = 윗머리 절반만 묶음 / 땋은 머리 = 땋기\n"
+    "   (그냥 한쪽으로 흐르거나 볼륨만 큰 건 묶음이 아님 — 아무것도 넣지 마라)\n"
+    "[장식] 대부분의 머리엔 장식이 없다. 머리카락에 박힌 물체가 누가 봐도 뚜렷할 때만 \"색+종류\"로 1개. "
+    "확대해도 애매하면 절대 넣지 마라(꽃·방울을 상상해서 넣지 말 것). 종류: 방울 / 구슬 / 핀 / 꽃 / 브릿지\n"
+    "[색] 정확히 1개 필수 — 검정 / 갈색 / 금색 / 은발 / 은회색 / 흰색 / 분홍 / 빨강 / 파랑 / 라벤더 / 보라 / 남색 / 주황\n\n"
+    "순서: 길이 → 결 → (묶은 형태) → (장식) → 색. 총 3~6개. JSON 문자열 배열로만."
 )
 
 
@@ -439,13 +446,53 @@ except Exception as _e:
     print(f"[app] set-match 데이터 없음({type(_e).__name__}) → 이미지검색은 평균 폴백")
 
 
-def _setmatch_scores(qvecs: np.ndarray) -> np.ndarray:
-    """qvecs (m,256, 정규화) → 헤어 N개 점수. score_i = Σ_j maxsim_ij · idf_j, idf=희귀도(soft-df)."""
+def _setmatch_scores(qvecs: np.ndarray, votew: np.ndarray = None) -> np.ndarray:
+    """qvecs (m,256, 정규화) → 헤어 N개 점수. score_i = Σ_j maxsim_ij · idf_j · votew_j.
+    idf=희귀도(soft-df), votew=Qwen 다회 호출 투표 가중(자주 나온 특징일수록↑, 일회성 환각↓)."""
     S = _HTOK @ qvecs.T                                    # (M, m) 각 헤어토큰 vs 질의토큰 코사인
     seg = np.maximum.reduceat(S, _H_OFFSETS[:-1], axis=0)  # (N, m) 아이템별 토큰 최대
     soft_df = (seg > 0.78).sum(axis=0)                     # (m,) 각 질의토큰이 걸리는 아이템 수
     idf = np.log((_H_N + 1) / (soft_df + 1)) + 1.0         # 희귀 특징 가중
+    if votew is not None:
+        idf = idf * votew
     return seg @ idf                                       # (N,)
+
+
+# ── 색은 최후순위: 염색 밝기(명도) 게이트 ────────────────────────────
+# 헤어는 염색 가능하나 어두운 발색을 밝게 물들이긴 어렵다. 참고색이 밝은데 발색이 훨씬 어두운 헤어는 탈락.
+_COLOR_V = {  # 색 이름 → 명도(0 어두움 ~ 1 밝음)
+    "흰색": .97, "은발": .9, "은백색": .9, "은회색": .68, "회색": .5, "금색": .85, "노랑": .9, "노란색": .9,
+    "분홍": .82, "분홍색": .82, "연분홍": .88, "핑크": .82, "라벤더": .8, "연보라": .78, "하늘": .85, "하늘색": .85,
+    "갈색": .45, "주황": .72, "주황색": .72, "빨강": .55, "빨간색": .55, "청록": .6, "초록": .5, "녹색": .5,
+    "파랑": .5, "파란색": .5, "보라": .45, "보라색": .45, "자주": .42, "자주색": .42, "남색": .3, "진보라": .35,
+    "검정": .13, "검은색": .13,
+}
+GATE_TOL = 0.22
+
+
+def _hair_brightness(id: str) -> float:
+    """헤어 발색 명도(신뢰도 반영). dom 확신 낮고 팔레트에 밝은 색 있으면 밝게 보정."""
+    c = _ITEM_COLORS.get(id) or {}
+    dom = c.get("dom"); ratio = c.get("ratio", 1.0); pal = c.get("pal") or []
+    dv = _COLOR_V.get(dom); lp = max([_COLOR_V.get(p, 0.0) for p in pal] or [0.0])
+    if dv is None:
+        return lp if pal else float("nan")
+    if ratio < 0.5 and lp > dv:      # dom 불확실 + 밝은 팔레트 존재 → 밝게 보정(은발이 회색으로 오판되는 문제)
+        return 0.5 * dv + 0.5 * lp
+    return dv
+
+
+if _HTOK is not None:
+    _HAIR_V = np.asarray([_hair_brightness(i) for i in _H_IDS], dtype=np.float32)  # (N,)
+
+
+# ── Qwen 출력 → 캡션 어휘 정규화(번/올림/당고→상투, 트윈테일→양갈래) ──
+def _canon_hair_token(t: str) -> str:
+    if "올림" in t:
+        return "높은 상투"
+    t = t.replace("트윈테일", "양갈래").replace("당고", "상투").replace("시뇽", "상투")
+    t = t.replace("번", "상투").replace("상투 묶음", "상투")
+    return t
 
 
 async def qwen_vl_words(image: str, prompt: str, temperature: float = 0.1) -> list[str]:
@@ -503,10 +550,13 @@ async def img_search(req: ImgSearchReq):
     # 다수결에 가깝게: 등장 빈도 기록(union 하되 자주 나온 특징을 앞에).
     from collections import Counter
     cnt = Counter()
+    nok = 0
     for o in outs:
         if isinstance(o, list):
-            cnt.update(set(o))             # 호출당 1표
+            cnt.update(set(o)); nok += 1    # 호출당 1표
+    # 전체 union 유지(변별 토큰 보존) + 투표수 기록(아래 집합매칭에서 가중치로 사용).
     words = [w for w, _ in cnt.most_common()]
+    _votes = dict(cnt); _ncalls = max(nok, 1)
     if not words:
         return {"count": 0, "results": [], "extractedWords": [], "error": "no-words"}
     form_words = _form_first(words)
@@ -514,27 +564,31 @@ async def img_search(req: ImgSearchReq):
 
     # 헤어 + 집합매칭 데이터 있으면 late-interaction 랭킹, 아니면 기존 평균 검색으로 폴백.
     if req.slot == "hair" and _HTOK is not None:
-        Q = await _embed_many(form_words)
-        scores = _setmatch_scores(Q)
-        # 색 tiebreaker(약하게): 형태가 우선이되, 참고색과 같은 계열 대표색을 소폭 우대(육안 유사도↑).
-        #   헤어는 염색 가능하므로 페널티는 아주 작게 — 다른 색이라도 형태가 맞으면 여전히 상위 노출.
-        qcol = canon_colors(" ".join(words))
-        if qcol:
-            qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcol])
-            cbon = np.fromiter(
-                ((0.8 if ITEM_PRIMARY[_H_ROW[j]] in qfam else (-0.25 if ITEM_PRIMARY[_H_ROW[j]] else 0.0))
-                 for j in range(_H_N)), dtype=np.float32, count=_H_N)
-            scores = scores + cbon
+        # 형태 우선: Qwen 용어를 캡션 어휘로 정규화(번→상투 등) 후 임베딩.
+        canon_words = [_canon_hair_token(w) for w in form_words]
+        Q = await _embed_many(canon_words)
+        # 투표 가중: 3회 중 자주 나온 특징일수록↑(0.5~1.0), 일회성 환각↓.
+        votew = np.asarray([0.5 + 0.5 * (_votes.get(w, 1) / _ncalls) for w in form_words], dtype=np.float32)
+        scores = _setmatch_scores(Q, votew)
+        # 색은 최후순위 = 염색 밝기 게이트. 참고색이 밝은데 발색이 훨씬 어두운 헤어는 탈락(어두운→밝은 염색 불가).
+        tvs = [_COLOR_V[w] for w in words if w in _COLOR_V]
+        gated = 0
+        if tvs:
+            target_v = max(tvs)                              # 여러 색이면 가장 밝은 쪽 기준(과탈락 방지)
+            fail = (_HAIR_V < (target_v - GATE_TOL))          # nan(미상)은 통과
+            gated = int(fail.sum())
+            scores = np.where(fail, -1e9, scores)
         k = min(req.topK, _H_N)
-        order = np.argsort(-scores)[:k]
+        order = [j for j in np.argsort(-scores).tolist() if scores[j] > -1e8][:k]
         results = []
-        for j in order.tolist():
+        for j in order:
             it = ITEMS[_H_ROW[j]]
             results.append({"id": it["id"], "slot": it["slot"], "name": it["name"],
                             "label": it.get("label"), "isCash": it.get("isCash"), "gender": it.get("gender"),
                             "words": it.get("words") or [], "tier": it.get("tier"),
                             "score": round(float(scores[j]), 4)})
-        return {"slot": "hair", "count": len(results), "extractedWords": words, "formWords": form_words,
+        return {"slot": "hair", "count": len(results), "extractedWords": words,
+                "formWords": form_words, "canonWords": canon_words, "gatedOut": gated,
                 "ms": {"vl": round(t_vl * 1000), "total": round((time.time() - t0) * 1000)},
                 "results": results}
 
