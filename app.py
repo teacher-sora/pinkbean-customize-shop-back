@@ -405,22 +405,22 @@ def health():
 # 참고 이미지를 Qwen3 VL(통제 어휘 프롬프트)로 읽어 헤어 키워드를 뽑고, 기존 텍스트 검색을 재사용.
 # 색은 염색 가능하므로 형태 우선(검색 파이프라인이 색을 2차 재정렬로만 반영). 프론트 업로드시 긴 변 1024 이하 권장.
 VL_MODEL = os.environ.get("VL_MODEL", "qwen3-vl-plus")
-# 캡션 어휘와 정확히 일치하는 통제어휘 + 묶음 형태 세분(상투/포니테일/양갈래/반묶음 구분 정의).
+# 단일 호출로 (a) 자세한 한 문장 서술 + (b) 통제어휘 토큰을 동시 출력 → 문장 dense + 토큰 집합매칭 융합.
+# ★ 색은 판단에서 제외(한벌옷 HSB·부분염색 대응) → 색을 아예 언급하지 않게 한다. 형태만.
 HAIR_VL_PROMPT = (
-    "참고 이미지의 머리카락만 보고, 아래 목록의 단어만 골라 JSON 배열로 출력한다. 목록에 없는 단어 금지.\n"
-    "옷·얼굴·눈·배경·안경·모자·왕관·동물귀·후광은 완전히 무시.\n\n"
-    "[길이] 정확히 1개 필수 — 짧은 머리(어깨 위) / 단발(어깨) / 중단발(쇄골) / 장발(가슴 아래)\n"
-    "[결] 1~2개 필수 — 생머리 / 웨이브 / 굵은 컬 / 곱슬 / 볼륨 / 스파이크\n"
-    "[묶은 형태] 실제로 묶었을 때만, 형태를 정확히 구분해서 1~2개:\n"
-    "   · 상투 = 머리를 둥글게 뭉쳐 얹은 덩어리(경단). 위치까지: 높은 상투 / 낮은 상투 / 한쪽 상투 / 양쪽 상투\n"
-    "   · 포니테일 = 하나로 묶어 길게 늘어뜨림: 높은 포니테일 / 낮은 포니테일 / 사이드 포니테일\n"
-    "   · 양갈래 = 좌우 둘로 나눠 묶음(트윈테일)\n"
-    "   · 반묶음 = 윗머리 절반만 묶음 / 땋은 머리 = 땋기\n"
-    "   (그냥 한쪽으로 흐르거나 볼륨만 큰 건 묶음이 아님 — 아무것도 넣지 마라)\n"
-    "[장식] 대부분의 머리엔 장식이 없다. 머리카락에 박힌 물체가 누가 봐도 뚜렷할 때만 \"색+종류\"로 1개. "
-    "확대해도 애매하면 절대 넣지 마라(꽃·방울을 상상해서 넣지 말 것). 종류: 방울 / 구슬 / 핀 / 꽃 / 브릿지\n"
-    "[색] 정확히 1개 필수 — 검정 / 갈색 / 금색 / 은발 / 은회색 / 흰색 / 분홍 / 빨강 / 파랑 / 라벤더 / 보라 / 남색 / 주황\n\n"
-    "순서: 길이 → 결 → (묶은 형태) → (장식) → 색. 총 3~6개. JSON 문자열 배열로만."
+    "참고 이미지의 머리카락(헤어)만 보고 아래 JSON 객체 하나로만 답하라. "
+    "옷·얼굴·눈·배경·안경·모자·왕관·동물귀·후광은 완전히 무시한다. **색은 절대 언급하지 마라(형태만).**\n\n"
+    "묶은 형태 구분:\n"
+    " · 상투 = 머리를 둥글게 뭉쳐 얹은 덩어리(경단). 위치: 높은 상투/낮은 상투/한쪽 상투/양쪽 상투\n"
+    " · 포니테일 = 하나로 묶어 늘어뜨림: 높은/낮은/사이드 포니테일\n"
+    " · 양갈래 = 좌우 둘로 나눠 묶음(트윈테일) · 땋은 머리 = 땋기(양갈래로 땋으면 '양갈래'+'땋은 머리')\n"
+    " · 반묶음 = 윗머리 절반만 묶음. (그냥 흐르거나 볼륨만 큰 건 묶음 아님)\n\n"
+    "{\n"
+    '  "desc": "머리 모양을 한국어 한 문장으로 자세히: 길이(짧은 머리/단발/중단발/장발), 묶은 형태와 위치, '
+    "결(생머리/웨이브/곱슬/굵은 컬/볼륨), 앞머리, 머리에 달린 장식. 색은 빼고 형태만.\",\n"
+    '  "words": ["위 특징을 명사 키워드로 4~9개. 길이 1개 필수 + 묶은 형태 + 결 + 앞머리 + 장식. 색 토큰 금지."]\n'
+    "}\n"
+    "부정문 금지, 색 금지. JSON 객체 하나만 출력."
 )
 
 
@@ -440,6 +440,7 @@ try:
     _ID2ROW = {it["id"]: i for i, it in enumerate(ITEMS)}
     _H_ROW = [_ID2ROW[i] for i in _H_IDS]                           # 헤어 i → 전체 ITEMS 인덱스
     _H_N = len(_H_IDS)
+    _HMAT = MAT[_H_ROW]                                              # (N,DIM) 헤어 평균벡터(문장 dense용)
     print(f"[app] set-match 로드: {_HTOK.shape[0]} 토큰 / {_H_N} 헤어")
 except Exception as _e:
     _HTOK = None
@@ -495,29 +496,34 @@ def _canon_hair_token(t: str) -> str:
     return t
 
 
-async def qwen_vl_words(image: str, prompt: str, temperature: float = 0.1) -> list[str]:
-    """참고 이미지 → 헤어 키워드 배열(괄호 주석 제거)."""
+import asyncio
+
+
+async def qwen_vl_hair(image: str, temperature: float = 0.2) -> tuple[str, list[str]]:
+    """참고 이미지 → (서술문 desc, 토큰 words). 단일 호출."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(
             f"{DASHSCOPE_BASE}/chat/completions",
             headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
-            json={"model": VL_MODEL, "temperature": temperature, "max_tokens": 200,
+            json={"model": VL_MODEL, "temperature": temperature, "max_tokens": 300,
                   "messages": [
-                      {"role": "system", "content": prompt},
+                      {"role": "system", "content": HAIR_VL_PROMPT},
                       {"role": "user", "content": [
                           {"type": "image_url", "image_url": {"url": image}},
-                          {"type": "text", "text": "헤어 키워드 JSON 배열로만."}]}]},
+                          {"type": "text", "text": "JSON 객체 하나로만."}]}]},
         )
         r.raise_for_status()
         c = r.json()["choices"][0]["message"]["content"]
-    m = re.search(r"\[.*\]", c, re.S)
+    m = re.search(r"\{.*\}", c, re.S)
     if not m:
-        return []
-    arr = json.loads(m.group(0))
-    return [re.sub(r"\s*\(.*?\)", "", str(t)).strip() for t in arr if str(t).strip()]
-
-
-import asyncio
+        return "", []
+    try:
+        d = json.loads(m.group(0))
+    except ValueError:
+        return "", []
+    desc = str(d.get("desc") or "").strip()
+    words = [re.sub(r"\s*\(.*?\)", "", str(t)).strip() for t in (d.get("words") or []) if str(t).strip()]
+    return desc, words
 
 _ORN_KW = ("방울", "구슬", "리본", "핀", "꽃", "브릿지", "하이라이트", "장식", "나비", "별", "상투", "포니", "묶음", "양갈래", "번", "땋")
 
@@ -532,69 +538,63 @@ async def _embed_many(texts: list[str]) -> np.ndarray:
     return np.vstack(vs).astype(np.float32)
 
 
+def _rrf_fuse(scoreA: np.ndarray, scoreB: np.ndarray, k: int = 60) -> np.ndarray:
+    """두 점수벡터를 Reciprocal Rank Fusion. 어느 한쪽에서 상위면 융합서도 상위(상호보완)."""
+    rankA = np.empty(len(scoreA), dtype=np.int64); rankA[np.argsort(-scoreA)] = np.arange(1, len(scoreA) + 1)
+    rankB = np.empty(len(scoreB), dtype=np.int64); rankB[np.argsort(-scoreB)] = np.arange(1, len(scoreB) + 1)
+    return 1.0 / (k + rankA) + 1.0 / (k + rankB)
+
+
 @app.post("/img_search")
 async def img_search(req: ImgSearchReq):
-    """이미지 → 키워드(Qwen VL ×2 union) → 헤어 집합매칭. 결과 형식은 /search 와 동일 + extractedWords."""
+    """이미지 → (Qwen VL 1회: 서술문+토큰) → 토큰 집합매칭 ⊕ 문장 dense 융합(RRF). 색 미사용."""
     if not req.image:
         return {"count": 0, "results": [], "extractedWords": []}
     t0 = time.time()
-    # Qwen VL 을 3회 호출(온도↑)해 union — 한 번 놓친 특징(상투/방울 등)을 다른 호출이 잡는다.
     try:
-        outs = await asyncio.gather(
-            qwen_vl_words(req.image, HAIR_VL_PROMPT, 0.1),
-            qwen_vl_words(req.image, HAIR_VL_PROMPT, 0.6),
-            qwen_vl_words(req.image, HAIR_VL_PROMPT, 0.9),
-            return_exceptions=True)
+        desc, words = await qwen_vl_hair(req.image)
     except Exception as e:
         return {"count": 0, "results": [], "extractedWords": [], "error": f"vl:{type(e).__name__}"}
-    # 다수결에 가깝게: 등장 빈도 기록(union 하되 자주 나온 특징을 앞에).
-    from collections import Counter
-    cnt = Counter()
-    nok = 0
-    for o in outs:
-        if isinstance(o, list):
-            cnt.update(set(o)); nok += 1    # 호출당 1표
-    # 전체 union 유지(변별 토큰 보존) + 투표수 기록(아래 집합매칭에서 가중치로 사용).
-    words = [w for w, _ in cnt.most_common()]
-    _votes = dict(cnt); _ncalls = max(nok, 1)
-    if not words:
+    if not words and not desc:
         return {"count": 0, "results": [], "extractedWords": [], "error": "no-words"}
-    form_words = _form_first(words)
+    form_words = _form_first(words) if words else []
     t_vl = time.time() - t0
 
-    # 헤어 + 집합매칭 데이터 있으면 late-interaction 랭킹, 아니면 기존 평균 검색으로 폴백.
     if req.slot == "hair" and _HTOK is not None:
-        # 형태 우선: Qwen 용어를 캡션 어휘로 정규화(번→상투 등) 후 임베딩.
-        canon_words = [_canon_hair_token(w) for w in form_words]
-        Q = await _embed_many(canon_words)
-        # 투표 가중: 3회 중 자주 나온 특징일수록↑(0.5~1.0), 일회성 환각↓.
-        votew = np.asarray([0.5 + 0.5 * (_votes.get(w, 1) / _ncalls) for w in form_words], dtype=np.float32)
-        scores = _setmatch_scores(Q, votew)
-        # 색은 최후순위 = 염색 밝기 게이트. 참고색이 밝은데 발색이 훨씬 어두운 헤어는 탈락(어두운→밝은 염색 불가).
-        tvs = [_COLOR_V[w] for w in words if w in _COLOR_V]
-        gated = 0
-        if tvs:
-            target_v = max(tvs)                              # 여러 색이면 가장 밝은 쪽 기준(과탈락 방지)
-            fail = (_HAIR_V < (target_v - GATE_TOL))          # nan(미상)은 통과
-            gated = int(fail.sum())
-            scores = np.where(fail, -1e9, scores)
+        # (A) 토큰 집합매칭 — Qwen 용어를 캡션 어휘로 정규화(번→상투 등), 색 제외.
+        scT = None
+        if form_words:
+            canon_words = [_canon_hair_token(w) for w in form_words]
+            Q = await _embed_many(canon_words)
+            scT = _setmatch_scores(Q)
+        # (B) 문장 dense — 서술문 임베딩 vs 헤어 평균벡터.
+        scS = None
+        if desc:
+            qs = await embed_query(desc)
+            scS = _HMAT @ qs
+        # 융합(RRF). 한쪽만 있으면 그것만.
+        if scT is not None and scS is not None:
+            fused = _rrf_fuse(scT, scS)
+        elif scT is not None:
+            fused = scT
+        else:
+            fused = scS
         k = min(req.topK, _H_N)
-        order = [j for j in np.argsort(-scores).tolist() if scores[j] > -1e8][:k]
+        order = np.argsort(-fused)[:k].tolist()
         results = []
         for j in order:
             it = ITEMS[_H_ROW[j]]
             results.append({"id": it["id"], "slot": it["slot"], "name": it["name"],
                             "label": it.get("label"), "isCash": it.get("isCash"), "gender": it.get("gender"),
                             "words": it.get("words") or [], "tier": it.get("tier"),
-                            "score": round(float(scores[j]), 4)})
+                            "score": round(float(fused[j]), 6)})
         return {"slot": "hair", "count": len(results), "extractedWords": words,
-                "formWords": form_words, "canonWords": canon_words, "gatedOut": gated,
+                "formWords": form_words, "desc": desc, "canonWords": [_canon_hair_token(w) for w in form_words],
                 "ms": {"vl": round(t_vl * 1000), "total": round((time.time() - t0) * 1000)},
                 "results": results}
 
-    res = await search(SearchReq(query="", words=form_words, slot=req.slot, topK=req.topK))
-    res["extractedWords"] = words
-    res["formWords"] = form_words
+    res = await search(SearchReq(query="", words=form_words or words, slot=req.slot, topK=req.topK))
+    res["extractedWords"] = words; res["desc"] = desc
     res["ms"] = {**res.get("ms", {}), "vl": round(t_vl * 1000)}
     return res
 
