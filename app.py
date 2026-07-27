@@ -377,6 +377,7 @@ class SearchReq(BaseModel):
     query: str
     slot: str | None = None      # 특정 슬롯(hair/cap/weapon...)만 검색. None=전체
     topK: int = 100
+    words: list[str] | None = None  # 이미지→단어 경로: 이미 추출된 키워드를 직접 사용(LLM 재정제 생략)
 
 
 async def embed_query(text: str) -> np.ndarray:
@@ -398,6 +399,150 @@ async def embed_query(text: str) -> np.ndarray:
 def health():
     return {"ok": True, "count": N, "dim": DIM, "model": EMBED_MODEL,
             "slots": {k: int(len(v)) for k, v in SLOT_ROWS.items()}}
+
+
+# ── 이미지 → 헤어 검색(코스프레) ─────────────────────────────────────
+# 참고 이미지를 Qwen3 VL(통제 어휘 프롬프트)로 읽어 헤어 키워드를 뽑고, 기존 텍스트 검색을 재사용.
+# 색은 염색 가능하므로 형태 우선(검색 파이프라인이 색을 2차 재정렬로만 반영). 프론트 업로드시 긴 변 1024 이하 권장.
+VL_MODEL = os.environ.get("VL_MODEL", "qwen3-vl-plus")
+HAIR_VL_PROMPT = (
+    "참고 이미지의 머리카락만 보고, 아래 목록의 단어만 골라 JSON 배열로 출력한다. 목록에 없는 단어 금지.\n"
+    "옷·얼굴·눈·배경·안경·모자·왕관·동물귀·후광·머리 위 소품은 완전히 무시한다.\n\n"
+    "[길이] 정확히 1개 필수 — 짧은 머리 / 단발 / 중단발 / 장발 (어깨 위=짧은 머리, 어깨=단발, 쇄골=중단발, 가슴 아래=장발)\n"
+    "[결] 1~2개 필수 — 생머리 / 웨이브 / 굵은 컬 / 곱슬 / 볼륨 / 스파이크\n"
+    "[묶음] 고무줄로 묶어 잘록한 매듭이 또렷할 때만. 머리가 한쪽으로 흐르거나 볼륨만 큰 건 묶음이 아님. 애매하면 생략 — 한쪽 묶음 / 양갈래 / 포니테일 / 상투 / 반묶음\n"
+    "[장식] 머리카락에 확실히 붙어있는 별개 물체만. 추측 금지, 없으면 생략. \"색+종류\"로 — 빨간 방울 / 분홍 꽃 / 흰 구슬 / 검은 핀 / 은색 브릿지\n"
+    "[색] 정확히 1개 필수 — 검정 / 갈색 / 금색 / 은발 / 은회색 / 흰색 / 분홍 / 빨강 / 파랑 / 라벤더 / 보라 / 초록 / 남색 / 주황\n\n"
+    "순서: 길이 → 결 → (묶음) → (장식) → 색. 확신 없는 항목은 넣지 마라. 총 3~6개. JSON 문자열 배열로만."
+)
+
+
+class ImgSearchReq(BaseModel):
+    image: str                    # data:URL(base64) 또는 http(s) 이미지 URL
+    slot: str = "hair"
+    topK: int = 60
+
+
+# ── 집합매칭(late-interaction) 데이터: 헤어 per-token 임베딩 ─────────────
+# 평균 벡터는 변별력이 약해(단발 400개가 같은 토큰 공유) 이미지검색에 부족 → 토큰별 max-sim + IDF 가중.
+try:
+    _HTOK = np.load(os.path.join(DATA, "hair_tok_vecs.f16.npy")).astype(np.float32)  # (M,256)
+    _hoff = json.load(open(os.path.join(DATA, "hair_tok_offsets.json"), encoding="utf-8"))
+    _H_OFFSETS = np.asarray(_hoff["offsets"], dtype=np.int64)       # 길이 N+1
+    _H_IDS = _hoff["ids"]                                            # 길이 N (헤어 등장순)
+    _ID2ROW = {it["id"]: i for i, it in enumerate(ITEMS)}
+    _H_ROW = [_ID2ROW[i] for i in _H_IDS]                           # 헤어 i → 전체 ITEMS 인덱스
+    _H_N = len(_H_IDS)
+    print(f"[app] set-match 로드: {_HTOK.shape[0]} 토큰 / {_H_N} 헤어")
+except Exception as _e:
+    _HTOK = None
+    print(f"[app] set-match 데이터 없음({type(_e).__name__}) → 이미지검색은 평균 폴백")
+
+
+def _setmatch_scores(qvecs: np.ndarray) -> np.ndarray:
+    """qvecs (m,256, 정규화) → 헤어 N개 점수. score_i = Σ_j maxsim_ij · idf_j, idf=희귀도(soft-df)."""
+    S = _HTOK @ qvecs.T                                    # (M, m) 각 헤어토큰 vs 질의토큰 코사인
+    seg = np.maximum.reduceat(S, _H_OFFSETS[:-1], axis=0)  # (N, m) 아이템별 토큰 최대
+    soft_df = (seg > 0.78).sum(axis=0)                     # (m,) 각 질의토큰이 걸리는 아이템 수
+    idf = np.log((_H_N + 1) / (soft_df + 1)) + 1.0         # 희귀 특징 가중
+    return seg @ idf                                       # (N,)
+
+
+async def qwen_vl_words(image: str, prompt: str, temperature: float = 0.1) -> list[str]:
+    """참고 이미지 → 헤어 키워드 배열(괄호 주석 제거)."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(
+            f"{DASHSCOPE_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+            json={"model": VL_MODEL, "temperature": temperature, "max_tokens": 200,
+                  "messages": [
+                      {"role": "system", "content": prompt},
+                      {"role": "user", "content": [
+                          {"type": "image_url", "image_url": {"url": image}},
+                          {"type": "text", "text": "헤어 키워드 JSON 배열로만."}]}]},
+        )
+        r.raise_for_status()
+        c = r.json()["choices"][0]["message"]["content"]
+    m = re.search(r"\[.*\]", c, re.S)
+    if not m:
+        return []
+    arr = json.loads(m.group(0))
+    return [re.sub(r"\s*\(.*?\)", "", str(t)).strip() for t in arr if str(t).strip()]
+
+
+import asyncio
+
+_ORN_KW = ("방울", "구슬", "리본", "핀", "꽃", "브릿지", "하이라이트", "장식", "나비", "별", "상투", "포니", "묶음", "양갈래", "번", "땋")
+
+
+def _form_first(words: list[str]) -> list[str]:
+    # 순수 색 토큰 제거(염색 가능). 색이 든 장식/묶음은 변별 특징이라 보존.
+    return [w for w in words if (not canon_colors(w)) or any(o in w for o in _ORN_KW)] or list(words)
+
+
+async def _embed_many(texts: list[str]) -> np.ndarray:
+    vs = await asyncio.gather(*[embed_query(t) for t in texts])
+    return np.vstack(vs).astype(np.float32)
+
+
+@app.post("/img_search")
+async def img_search(req: ImgSearchReq):
+    """이미지 → 키워드(Qwen VL ×2 union) → 헤어 집합매칭. 결과 형식은 /search 와 동일 + extractedWords."""
+    if not req.image:
+        return {"count": 0, "results": [], "extractedWords": []}
+    t0 = time.time()
+    # Qwen VL 을 3회 호출(온도↑)해 union — 한 번 놓친 특징(상투/방울 등)을 다른 호출이 잡는다.
+    try:
+        outs = await asyncio.gather(
+            qwen_vl_words(req.image, HAIR_VL_PROMPT, 0.1),
+            qwen_vl_words(req.image, HAIR_VL_PROMPT, 0.6),
+            qwen_vl_words(req.image, HAIR_VL_PROMPT, 0.9),
+            return_exceptions=True)
+    except Exception as e:
+        return {"count": 0, "results": [], "extractedWords": [], "error": f"vl:{type(e).__name__}"}
+    # 다수결에 가깝게: 등장 빈도 기록(union 하되 자주 나온 특징을 앞에).
+    from collections import Counter
+    cnt = Counter()
+    for o in outs:
+        if isinstance(o, list):
+            cnt.update(set(o))             # 호출당 1표
+    words = [w for w, _ in cnt.most_common()]
+    if not words:
+        return {"count": 0, "results": [], "extractedWords": [], "error": "no-words"}
+    form_words = _form_first(words)
+    t_vl = time.time() - t0
+
+    # 헤어 + 집합매칭 데이터 있으면 late-interaction 랭킹, 아니면 기존 평균 검색으로 폴백.
+    if req.slot == "hair" and _HTOK is not None:
+        Q = await _embed_many(form_words)
+        scores = _setmatch_scores(Q)
+        # 색 tiebreaker(약하게): 형태가 우선이되, 참고색과 같은 계열 대표색을 소폭 우대(육안 유사도↑).
+        #   헤어는 염색 가능하므로 페널티는 아주 작게 — 다른 색이라도 형태가 맞으면 여전히 상위 노출.
+        qcol = canon_colors(" ".join(words))
+        if qcol:
+            qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcol])
+            cbon = np.fromiter(
+                ((0.8 if ITEM_PRIMARY[_H_ROW[j]] in qfam else (-0.25 if ITEM_PRIMARY[_H_ROW[j]] else 0.0))
+                 for j in range(_H_N)), dtype=np.float32, count=_H_N)
+            scores = scores + cbon
+        k = min(req.topK, _H_N)
+        order = np.argsort(-scores)[:k]
+        results = []
+        for j in order.tolist():
+            it = ITEMS[_H_ROW[j]]
+            results.append({"id": it["id"], "slot": it["slot"], "name": it["name"],
+                            "label": it.get("label"), "isCash": it.get("isCash"), "gender": it.get("gender"),
+                            "words": it.get("words") or [], "tier": it.get("tier"),
+                            "score": round(float(scores[j]), 4)})
+        return {"slot": "hair", "count": len(results), "extractedWords": words, "formWords": form_words,
+                "ms": {"vl": round(t_vl * 1000), "total": round((time.time() - t0) * 1000)},
+                "results": results}
+
+    res = await search(SearchReq(query="", words=form_words, slot=req.slot, topK=req.topK))
+    res["extractedWords"] = words
+    res["formWords"] = form_words
+    res["ms"] = {**res.get("ms", {}), "vl": round(t_vl * 1000)}
+    return res
 
 
 # ── 부정어(제외) 처리 ────────────────────────────────────────────────
@@ -447,17 +592,22 @@ def _item_negated(it, ex) -> bool:
 @app.post("/search")
 async def search(req: SearchReq):
     q = (req.query or "").strip()
-    if not q:
+    if not q and not req.words:
         return {"query": q, "count": 0, "results": []}
     t0 = time.time()
     # ① LLM 정제: 문장 → 캡션과 같은 형태(단어 나열) + 부위/성별 분리. 실패하면 규칙 기반으로 폴백.
-    ref = await refine_query(q)
-    if ref:
-        words, ref_slot, allowed_g = ref
+    if req.words:  # 이미지→단어 경로: Qwen VL 이 뽑은 키워드를 그대로 사용(재정제 생략)
+        words, ref_slot, allowed_g = list(req.words), req.slot, None
+        if not q:
+            q = " ".join(words)   # 이름가산 등 원문 기반 로직이 안전하게 동작하도록
     else:
-        ref_slot = None
-        allowed_g, _cq = detect_gender(q)  # 폴백: 성별 토큰만 제거
-        words = _cq.split()
+        ref = await refine_query(q)
+        if ref:
+            words, ref_slot, allowed_g = ref
+        else:
+            ref_slot = None
+            allowed_g, _cq = detect_gender(q)  # 폴백: 성별 토큰만 제거
+            words = _cq.split()
     # 부정어(제외): 원문에서 '<특징> 없고' 파싱 → 긍정 임베딩에서 그 특징/마커를 빼고, 제외토큰 집합을 만든다.
     neg_terms = parse_negatives(q)
     neg_ex = neg_exclude_tokens(neg_terms) if neg_terms else set()
@@ -466,11 +616,20 @@ async def search(req: SearchReq):
         words = [w for w in words if w not in _drop and not any(w.endswith(m) for m in _NEG_MARKERS)]
     # 정체성 = 개념(명사)이지 색이 아니다. 임베딩은 **색을 뺀 개념**만으로 → 색이 개념을 덮지 않게.
     # 색은 아래에서 개념 매치 안의 2차 재정렬로만 반영. 어순 불변을 위해 정렬해 임베딩.
-    qcolors = canon_colors(" ".join(words)) | canon_colors(q)
-    concept_words = [w for w in words if not canon_colors(w)]
-    embed_words = concept_words or words           # 순수 색 질의면 색 자체로 임베딩
-    cleaned = " ".join(sorted(embed_words))
-    color_strong = not concept_words               # 개념 없이 색만 → 색 강하게
+    if req.words:
+        # 이미지→단어(형태우선): 엔드포인트에서 순수 색은 이미 제거·색장식은 보존됨.
+        # 내부 색 재필터/색 페널티를 끄고(색은 염색 가능) 단어를 그대로 임베딩한다.
+        qcolors = set()
+        concept_words = list(words)
+        embed_words = words
+        cleaned = " ".join(sorted(embed_words))
+        color_strong = False
+    else:
+        qcolors = canon_colors(" ".join(words)) | canon_colors(q)
+        concept_words = [w for w in words if not canon_colors(w)]
+        embed_words = concept_words or words           # 순수 색 질의면 색 자체로 임베딩
+        cleaned = " ".join(sorted(embed_words))
+        color_strong = not concept_words               # 개념 없이 색만 → 색 강하게
     t_refine = time.time() - t0
 
     t1 = time.time()
