@@ -12,6 +12,7 @@ import os
 import re
 import json
 import time
+import unicodedata
 import random
 import numpy as np
 import httpx
@@ -48,7 +49,10 @@ PINKBEAN_SYSTEM = (
     "- ⚠️ **반말로만** 말해라(핑크빈은 어린아이다). '~요', '~니다' 같은 존댓말 금지.\n"
     "- ★ 아이템마다 '생김새'가 함께 적혀 있으면 **그 생김새를 보고** 반응해라(이름만 보고 넘겨짚지 말 것).\n"
     "- ★ 매번 **다른 곳에 눈이 가야 한다.** 머리·옷·신발·무기·장식 등 여러 부위 중 이번엔 무엇이 눈에 띄었는지 골라서 말해라.\n"
-    "- ★ '방금 한 말'이 주어지면 **그것과 겹치는 소재·표현은 피하고** 새로운 얘기를 해라."
+    "- ★ '방금 한 말'이 주어지면 **그것과 겹치는 소재·표현은 피하고** 새로운 얘기를 해라.\n"
+    "- ⛔ 성적인 말, 성폭력(강간·추행 등)을 뜻하는 말, 신체 부위를 성적으로 가리키는 말, 욕설, 폭력·자해를 "
+    "암시하는 말은 **절대 쓰지 마라.** 핑크빈은 어린아이이고, 코디 구경은 누구나 보는 자리야. "
+    "옷이나 장식을 의인화할 때도 그런 비유를 쓰지 마라(예: 옷이 '당했다'는 식의 표현 금지)."
 )
 
 # ── 데이터 적재(모듈 로드 = 워커별 1회) ─────────────────────────────
@@ -840,6 +844,49 @@ def _extract_bubbles(text: str) -> list[str]:
     return []
 
 
+# ── 말풍선 안전망 ────────────────────────────────────────────────────────
+# 2026-09-21 사용자 제보: 말풍선에 "넥타이가 벌써부터 강간당한 기분 아니야?" 가 나왔다.
+# 지시문은 확률을 낮출 뿐 **못 막는다** → 나온 문장을 코드로 검사해 걸리면 버리고, 모자라면 한 번 더 받는다.
+# 프런트(front/src/lib/safeText.ts)도 같은 규칙으로 화면 직전에 한 번 더 본다(양쪽 배포가 따로라서).
+# 오탐은 말풍선 하나를 잃을 뿐이라 넉넉히 잡되, 패션 얘기에서 정상적으로 쓰이는 말은 일부러 뺐다:
+#   노출(노출이 심한 옷) · 누드(누드톤) · 로리타(패션 장르) · 벗겨(칠이 벗겨진) · 죽여(죽여주는 코디)
+#   · 사정(사정이 있어) · 보지/자지(보지 마, 만지지 — 어미와 겹친다) · 씹(씹다; 욕설 형태만 따로 잡는다)
+_BAN_LOOSE = (  # 띄어쓰기·기호를 무시하고 찾는다("강 간", "강.간" 도 잡힌다)
+    "강간", "윤간", "성폭행", "성폭력", "성추행", "강제추행", "성희롱", "몰카", "불법촬영", "그루밍범죄",
+    "근친상간", "수간", "시간증", "아동포르노", "아동성착취", "미성년자성", "로리콘", "쇼타콘", "따먹",
+    "섹스", "섹드립", "섹파", "야동", "포르노", "음란", "외설", "페티시", "노출증", "스와핑", "콘돔",
+    "오르가슴", "자위행위", "발기", "정액", "애액", "유두", "젖꼭지", "성기", "음경", "고환", "질내",
+    "삽입", "교미", "발정", "떡치", "야스", "19금", "성인물", "에로물", "변태성", "딜도", "사까시",
+    "자살", "자해",
+)
+_BAN_TIGHT = ("좆", "씨발", "씹할", "씹새", "병신", "지랄", "개새끼", "니미", "썅", "창녀", "화냥")
+_BAN_TIGHT_RE = re.compile(r"시발(?!점|역|탄)")  # '시발점'(시작점)은 정상 낱말이라 뺀다
+_BAN_EN = re.compile(
+    r"\b(?:rape|raping|molest|incest|bestiality|porn|porno|nsfw|orgasm|masturbate|masturbation|"
+    r"blowjob|handjob|dildo|horny|boobs|tits|pussy|dick|penis|vagina|nipple|naked|sex|sexual|cum|slut|whore)\b",
+    re.I,
+)
+_SQUEEZE = re.compile(r"[^0-9A-Za-z가-힣]+")
+_SAFE_FALLBACK = ["뀨…? 지금은 좀 부끄러운걸!", "음… 뭐라고 해야 하지?"]
+
+
+def _unsafe(text: str) -> bool:
+    """화면에 올리면 안 되는 문장인가."""
+    low = unicodedata.normalize("NFKC", text or "").lower()
+    if not low.strip():
+        return True
+    if any(w in low for w in _BAN_TIGHT) or _BAN_TIGHT_RE.search(low):
+        return True
+    if _BAN_EN.search(low):
+        return True
+    squeezed = _SQUEEZE.sub("", low)
+    return any(w in squeezed for w in _BAN_LOOSE)
+
+
+def _safe_bubbles(bubbles: list[str]) -> list[str]:
+    return [b for b in bubbles if not _unsafe(b)]
+
+
 @app.post("/rate")
 async def rate(req: RateReq):
     # 아이템 이름만 보내면 "윈디 헤어(여)" 처럼 생김새 정보가 없어 모델이 헤어를 무시하고
@@ -862,7 +909,8 @@ async def rate(req: RateReq):
         parts.append("방금 한 말(겹치지 마):\n" + "\n".join(f"- {h}" for h in hist))
     parts.append(f"말풍선 {n}개로 말해줘.")
     user = "\n\n".join(parts)
-    try:
+
+    async def _ask(extra: str = "") -> str:
         async with httpx.AsyncClient(timeout=18.0) as client:
             r = await client.post(
                 f"{DASHSCOPE_BASE}/chat/completions",
@@ -871,7 +919,7 @@ async def rate(req: RateReq):
                     "model": RATE_MODEL,
                     "messages": [
                         {"role": "system", "content": PINKBEAN_SYSTEM},
-                        {"role": "user", "content": user},
+                        {"role": "user", "content": user + extra},
                     ],
                     "response_format": {"type": "json_object"},
                     "temperature": 0.9,
@@ -879,12 +927,25 @@ async def rate(req: RateReq):
                 },
             )
             r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
+            return r.json()["choices"][0]["message"]["content"]
+
+    try:
+        content = await _ask()
     except Exception as e:
         return {"bubbles": ["뀨…? 지금은 좀 부끄러운걸!", "이따 다시 보여줘…"], "error": str(e)[:120]}
-    bubbles = _extract_bubbles(content)
+    raw = _extract_bubbles(content)
+    bubbles = _safe_bubbles(raw)          # 성적·폭력적 표현이 섞인 말풍선은 버린다
+    dropped = len(raw) - len(bubbles)
+    # 다 버려졌으면 더 강하게 못 박아 한 번만 더 받는다(두 번까지만 — 더 하면 응답이 너무 늦다).
+    if not bubbles and raw:
+        try:
+            bubbles = _safe_bubbles(_extract_bubbles(await _ask(
+                "\n\n⚠️ 성적인 말·성폭력을 뜻하는 말·욕설·폭력이나 자해를 암시하는 말은 절대 쓰지 마. "
+                "옷이나 장식을 의인화할 때도 그런 비유를 쓰지 마. 밝고 귀엽게만 말해줘.")))
+        except Exception:
+            bubbles = []
     if len(bubbles) > n:      # 모델이 개수를 어기면 코드로 맞춘다
         bubbles = bubbles[:n][:3]
     if not bubbles:
         bubbles = ["뀨? 뭔가 신기한 코디인데?", "부농부농! 마음에 들어!"]
-    return {"bubbles": bubbles, "model": RATE_MODEL}
+    return {"bubbles": bubbles, "model": RATE_MODEL, "dropped": dropped}
