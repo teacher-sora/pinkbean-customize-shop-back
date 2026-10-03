@@ -1,41 +1,47 @@
 # pinkbean-customize-shop-back
 
-메이플스토리 코디샵 **AI 코디 검색** 백엔드 (1차). 코디 아이템 스프라이트를 Vision LLM으로
-캡션 → `text-embedding-v4` 임베딩한 벡터를 브루트포스 코사인 검색한다.
+핑크빈 커마샵의 **AI 코디 검색**과 **코디 평가(핑크빈 말풍선)** 백엔드. FastAPI, Fly.io.
 
-> ⚠️ **베타/개선 중**: 캡션 QC는 전체의 ~11%만 완료(한벌옷 37%, 그 외 5~10%). Qwen3 VL
-> Flash/Plus + Claude Sonnet 정정. 더 좋은 임베딩으로 점진 업그레이드 예정.
+아이템마다 미리 써 둔 캡션(보이는 특징 단어)을 `text-embedding-v4` 로 임베딩해 두고,
+질의문을 같은 공간에 임베딩해 브루트포스 코사인으로 찾는다.
 
 ## 구조
-- `data/vectors_256.f16.npy` — 15,672 × 256 float16(정규화). 코사인 = 내적.
-- `data/meta.json` — 벡터 행과 동일 순서의 `{id, slot, name, gender, grade, isCash, image_source}`.
-- `app.py` — FastAPI. 기동 시 벡터/메타 적재, `/search` 에서 질의 임베딩 + topK.
-- `build/precompute.py` — `result/`(맥 산출물) → 위 아티팩트 생성.
+- `app.py` — 기동 시 벡터·메타를 메모리에 올린다. 엔드포인트 3개.
+- `data/vectors_256.f16.npy` — 10,319 × 256 float16(L2 정규화). 코사인 = 내적.
+- `data/meta.json` — `{dim, model, count, items}`. `items` 는 벡터 행과 **같은 순서**의
+  `{id, slot, name, words, label, isCash, gender, tier}`.
+- `data/item_colors.json` — 아이템 대표색(색이 든 질의의 2차 재정렬용).
+- `build/from_transfer.py` — 캡션·임베딩 산출물을 `data/` 로 옮긴다.
+- `build/localtest.py` — 임베딩 리전 확인 + 검색 스모크 테스트.
+
+캡션 대상은 캐시 아이템 12부위다(hair, face, cap, faceAcc, eyeAcc, coat, longcoat, pants, shoes, glove, cape, weapon).
 
 ## API
 ```
-GET  /health
-POST /search   { "query": "세일러복 절대영역", "slot": "longcoat"|null, "topK": 60 }
-     → { results: [{ id, slot, name, grade, isCash, gender, image_source, score }], ms:{embed,total} }
+GET  /health   → { ok, count, dim, model, slots }
+POST /search   { "query": "세일러복 절대영역", "slot": "longcoat"|null, "topK": 100 }
+               → { query, slot, refined, count, results: [{ id, slot, name, ... , score }], ms }
+POST /rate     { "items": [{ "slot", "name", "id" }], "tone": 12, "history": ["직전 말풍선"] }
+               → { bubbles: ["..."], model, dropped }
 ```
-`slot` 은 코디탭 부위(hair/face/cap/faceAcc/eyeAcc/earring/coat/longcoat/pants/shoes/glove/cape/weapon/shield).
+- `/search` 는 질의를 LLM 으로 정제(단어 나열 + 부위·성별 분리)한 뒤 임베딩한다. "리본 없는" 같은 부정어는
+  코드로 파싱해 그 특징을 가진 아이템을 후보에서 뺀다.
+- `/rate` 의 말풍선은 모델이 짓는다. 나온 문장을 코드로 검사해 부적절하면 버린다(프런트도 같은 규칙으로 한 번 더 본다).
 
 ## 로컬 실행
 ```bash
 pip install -r requirements.txt
-QWEN_API_KEY=... uvicorn app:app --port 8080 --workers 2
+QWEN_API_KEY=... uvicorn app:app --port 8080
 ```
 
 ## 배포 (Fly.io)
 ```bash
 fly deploy
-fly secrets set QWEN_API_KEY=...        # DashScope 키
-# 계정 리전이 본토면: fly secrets set DASHSCOPE_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+fly secrets set QWEN_API_KEY=...        # DashScope 키(intl 엔드포인트)
 ```
-`cpu=1` + uvicorn 워커 2개(병렬). nrt(도쿄) 리전, 512MB, 1대 예열(콜드스타트 제거).
+도쿄(nrt), shared-cpu 1개 · 512MB · 워커 1개. 유휴 시 머신이 멈추고 요청이 오면 다시 켜진다.
+배포 뒤 `/health` 의 `count` 로 벡터 수를 확인한다.
 
-## 벡터 재빌드 (골드 확장·재임베딩 후)
-```bash
-python build/precompute.py  "/path/to/result"
-git add data && git commit -m "rebuild vectors" && fly deploy
-```
+## 벡터를 바꿀 때
+`data/meta.json` 의 `items` 순서와 `vectors_256.f16.npy` 의 행 순서가 반드시 같아야 한다.
+신규 아이템은 뒤에 덧붙이고, 기존 아이템의 캡션을 고치면 그 행의 벡터도 다시 임베딩한다.

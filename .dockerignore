@@ -8,6 +8,3 @@ build
 README.md
 .env
 .env.local
-
-# 재캡션 작업 중 만든 백업본 — 이미지에 넣지 않는다(7MB).
-*.pre-final
