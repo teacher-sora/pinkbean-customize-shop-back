@@ -155,6 +155,162 @@
     "스타킹 반바지"
    ],
    "top": 20
+  },
+  {
+   "q": "동물 귀",
+   "slot": "cap",
+   "expect": [
+    "겨울여우 머리띠",
+    "루티 귀장식",
+    "시노 귀장식"
+   ],
+   "reject": [
+    "곰순돌 후디",
+    "핑순돌 후디",
+    "햇살 여우 모자"
+   ],
+   "top": 100
+  },
+  {
+   "q": "동물 귀 모자",
+   "slot": "cap",
+   "expect": [
+    "곰순돌 후디",
+    "햇살 여우 모자"
+   ],
+   "reject": [
+    "루티 귀장식",
+    "시노 귀장식"
+   ],
+   "top": 300
+  },
+  {
+   "q": "동물 귀",
+   "slot": null,
+   "expect_slot": "cap",
+   "top": 20
+  },
+  {
+   "q": "스타킹",
+   "slot": null,
+   "expect_slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "니삭스",
+   "slot": null,
+   "expect_slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "양말 달린 한벌옷",
+   "slot": null,
+   "expect_slot": "longcoat",
+   "expect": [
+    "캠퍼스 소녀"
+   ],
+   "top": 300
+  },
+  {
+   "q": "스타킹 있는 원피스",
+   "slot": null,
+   "expect_slot": "longcoat",
+   "top": 10
+  },
+  {
+   "q": "교복",
+   "slot": "longcoat",
+   "expect": [
+    "캠퍼스 소녀",
+    "따스한 그리움"
+   ],
+   "top": 80
+  },
+  {
+   "q": "교복 목도리 체크무늬 치마",
+   "slot": "longcoat",
+   "expect": [
+    "따스한 그리움"
+   ],
+   "top": 10
+  },
+  {
+   "q": "블레이저 목도리",
+   "slot": "longcoat",
+   "expect": [
+    "따스한 그리움"
+   ],
+   "top": 20
+  },
+  {
+   "q": "니트 조끼 셔츠 교복",
+   "slot": "longcoat",
+   "expect": [
+    "캠퍼스 소녀"
+   ],
+   "top": 10
+  },
+  {
+   "q": "오피스룩",
+   "slot": "longcoat",
+   "expect": [
+    "에이스 사원"
+   ],
+   "top": 40
+  },
+  {
+   "q": "H라인 스커트",
+   "slot": "longcoat",
+   "expect": [
+    "에이스 사원"
+   ],
+   "top": 30
+  },
+  {
+   "q": "딱 붙는 일자 치마 사원증",
+   "slot": "longcoat",
+   "expect": [
+    "에이스 사원"
+   ],
+   "top": 10
+  },
+  {
+   "q": "제복 망토 짧은 바지",
+   "slot": "longcoat",
+   "expect": [
+    "베로니카 한벌옷"
+   ],
+   "top": 20
+  },
+  {
+   "q": "드레스",
+   "slot": "longcoat",
+   "top": 20
+  },
+  {
+   "q": "빨간 드레스",
+   "slot": "longcoat",
+   "top": 20
+  },
+  {
+   "q": "쎄보이는 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "강아지상",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "졸려보이는 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "무쌍",
+   "slot": "face",
+   "top": 20
   }
  ],
  "stable": [

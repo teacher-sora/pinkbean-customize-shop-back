@@ -99,9 +99,16 @@ async def main():
             it = items[row_of[cid]]
             it["words"], it["short"], it["tier"] = r["caption"], r["short"], "v2"
             changed.append(row_of[cid])
+            # 모자의 갈래(kind)·귀 유무는 검색의 귀 규칙이 쓴다 — 낱말이 아니라 관찰 필드로 가른다.
+            for k in ("kind", "has_ears", "animal"):
+                if r.get(k) is not None:
+                    it[k] = r[k]
         else:
             items.append({"id": cid, "slot": r["slot"], "name": r["name"], "words": r["caption"], "short": r["short"],
                           "gender": gender_of(r["name"]), "label": r.get("label"), "isCash": r.get("isCash", True), "tier": "v2"})
+            for k in ("kind", "has_ears", "animal"):
+                if r.get(k) is not None:
+                    items[-1][k] = r[k]
             added.append(len(items) - 1)
     print(f"바뀐 행 {len(changed)} · 덧붙인 행 {len(added)} · 전체 {len(items)}")
 
