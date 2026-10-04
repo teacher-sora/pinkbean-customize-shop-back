@@ -5,6 +5,7 @@ venv
 __pycache__
 *.pyc
 build
+captions
 README.md
 .env
 .env.local
