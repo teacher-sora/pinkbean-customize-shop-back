@@ -1,7 +1,7 @@
 """
 캡션 정본(back/captions/<부위>.jsonl)을 검색 데이터(back/data/)에 반영한다.
 
-  python build/embed_apply.py --slots hair [--cache CACHE.json] [--dry]
+  python build/embed_apply.py --slots hair,face [--new cap,weapon] [--legs longcoat,pants] [--cache CACHE.json] [--dry]
 
 하는 일
   · meta.json: 그 부위 아이템의 words(상세 캡션)·short(짧은 캡션)를 바꾸고 tier 를 "v2" 로 적는다.
@@ -44,13 +44,15 @@ def gender_of(name):
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slots", default="", help="캡션 전체를 정본으로 바꿀 부위")
+    ap.add_argument("--new", default="", help="정본에만 있는(검색 데이터에 아직 없는) 아이템만 덧붙일 부위 — 전량 재캡션 전인 부위의 패치 신규분")
     ap.add_argument("--legs", default="", help="다리 낱말만 정본으로 바꿀 부위(longcoat,pants)")
     ap.add_argument("--cache", default=os.path.join(BACK, "build", ".embcache.json"))
     ap.add_argument("--dry", action="store_true", help="저장하지 않고 바뀔 내용만 센다")
     a = ap.parse_args()
     slots = [s for s in a.slots.split(",") if s]
     legs = [s for s in a.legs.split(",") if s]
-    touched = set(slots) | set(legs)
+    new_only = [s for s in a.new.split(",") if s]
+    touched = set(slots) | set(legs) | set(new_only)
 
     meta = json.load(open(os.path.join(DATA, "meta.json"), encoding="utf-8"))
     items = meta["items"]
@@ -83,11 +85,13 @@ async def main():
         print(f"다리 낱말만 바꾼 행 {len(leg_changed)}")
 
     caps = {}
-    for s in slots:
+    for s in slots + new_only:
         f = os.path.join(CAPS, f"{s}.jsonl")
         for line in open(f, encoding="utf-8"):
             if line.strip():
                 r = json.loads(line)
+                if s in new_only and r["id"] in row_of:
+                    continue   # 이미 있는 아이템은 건드리지 않는다(옛 캡션과 섞지 않는다)
                 caps[r["id"]] = r
     changed, added = [], []
     for cid, r in caps.items():
