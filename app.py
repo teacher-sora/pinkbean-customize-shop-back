@@ -304,6 +304,7 @@ IS_SHOES = np.asarray([it.get("slot") == "shoes" and (it.get("kind") is None or 
 # 가산이 낱말 일치 가산(0.30)보다 커야 한다: 신발 부위의 양말은 대부분 발목 높이라 `양말` 로 적히고,
 # `스타킹`·`니삭스` 낱말을 가진 것은 몇 개뿐이다. 사용자는 셋을 한 갈래로 찾는다.
 HOSE_SHOES_BONUS, HOSE_OTHER_PEN = 0.35, 0.05
+HOSE_PANTS_PEN = 0.30   # 스타킹 검색에서 '이어진 다리 덮개'(바지로도 읽히는 다리)를 뒤로 보내는 폭
 
 
 def hose_adjust(rows):
@@ -947,6 +948,10 @@ async def search(req: SearchReq):
     if any(h in cleaned for h in ("스타킹", "타이츠", "팬티스타킹", "니삭스")):
         # 신발까지 달린 것은 스타킹 요소로는 덜 순수하다 → 확실히 뒤로(다른 스타킹 아이템이 먼저 나온다).
         scores = scores - 0.20 * np.fromiter(("신발 포함" in WORDS_JOINED[r] for r in rows.tolist()), dtype=bool, count=len(rows))
+    if any(h in cleaned or h in q for h in ("스타킹", "타이츠", "니삭스", "양말")):
+        # 옷 끝에서 틈·윗단 없이 바로 이어지는 불투명한 다리('이어진 다리 덮개')는 바지·레깅스로도 읽힌다
+        # → 빼지는 않고 확실한 스타킹·양말(맨살 틈·윗단·비침) 뒤로 보낸다.
+        scores = scores - HOSE_PANTS_PEN * np.fromiter(("이어진 다리 덮개" in WORDS_JOINED[r] for r in rows.tolist()), dtype=bool, count=len(rows))
     # 헤어·성형: 신형(높은 ID) 완만 우대.
     scores = scores + ID_BONUS[rows]
     # 전체(슬롯 미지정) 검색에서 옷 개념은 한벌옷을 소폭 우선(최근 신상·완성도 높은 아이템이 한벌옷 위주,
