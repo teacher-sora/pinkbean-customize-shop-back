@@ -1,0 +1,629 @@
+{
+ "_": "배포 전후에 같은 질의로 결과를 비교하는 고정 세트. expect 는 상위 N 안에 나와야 하는 아이템 이름(부분 일치), reject 는 상위 N 안에 나오면 안 되는 것. 같은 조건을 만족하는 아이템이 수십 개인 질의는 top 을 넓게 잡는다(특정 아이템이 반드시 10위 안일 이유가 없다).",
+ "checks": [
+  {
+   "q": "총",
+   "slot": "weapon",
+   "expect": [
+    "디바인 그레이스"
+   ],
+   "top": 30
+  },
+  {
+   "q": "총열 긴 총",
+   "slot": "weapon",
+   "expect": [
+    "디바인 그레이스"
+   ],
+   "top": 10
+  },
+  {
+   "q": "발끝까지 오는 양갈래",
+   "slot": "hair",
+   "expect": [
+    "큐링 헤어"
+   ],
+   "top": 60
+  },
+  {
+   "q": "앞머리 틈 있는 긴 양갈래",
+   "slot": "hair",
+   "expect": [
+    "큐링 헤어"
+   ],
+   "top": 60
+  },
+  {
+   "q": "양갈래 당고머리 웨이브",
+   "slot": "hair",
+   "expect": [
+    "큐링 헤어"
+   ],
+   "top": 60
+  },
+  {
+   "q": "진한 색 긴 양갈래",
+   "slot": "hair",
+   "expect": [
+    "큐링 헤어"
+   ],
+   "top": 60
+  },
+  {
+   "q": "앞머리 덮은 발끝까지 긴 머리 반묶음",
+   "slot": "hair",
+   "expect": [
+    "레아 헤어"
+   ],
+   "top": 10
+  },
+  {
+   "q": "땋은 반묶음 긴 머리",
+   "slot": "hair",
+   "expect": [
+    "레아 헤어"
+   ],
+   "top": 10
+  },
+  {
+   "q": "연한 계열 발끝 길이 반묶음",
+   "slot": "hair",
+   "expect": [
+    "레아 헤어 (여)"
+   ],
+   "reject": [
+    "밤의 레아 헤어"
+   ],
+   "top": 10
+  },
+  {
+   "q": "진한 계열 발끝 길이 반묶음",
+   "slot": "hair",
+   "expect": [
+    "밤의 레아 헤어"
+   ],
+   "top": 5
+  },
+  {
+   "q": "차가운 눈매",
+   "slot": null,
+   "expect_slot": "face",
+   "top": 20
+  },
+  {
+   "q": "날카로운 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "귀여운 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "맹해 보이는 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "사랑스러운 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "스타킹",
+   "slot": "longcoat",
+   "expect": [
+    "아지트 소녀",
+    "서고 계승자",
+    "낭만협객 (여)",
+    "따스한 그리움",
+    "루돌프 후디 (여)",
+    "베로니카 한벌옷"
+   ],
+   "reject": [
+    "오프닝 스타",
+    "(남)"
+   ],
+   "top": 300
+  },
+  {
+   "q": "한벌옷 스타킹",
+   "slot": null,
+   "expect": [
+    "아지트 소녀"
+   ],
+   "reject": [
+    "오프닝 스타",
+    "(남)"
+   ],
+   "top": 300,
+   "expect_slot": "longcoat"
+  },
+  {
+   "q": "니삭스",
+   "slot": "longcoat",
+   "reject": [
+    "(남)"
+   ],
+   "top": 300
+  },
+  {
+   "q": "스타킹",
+   "slot": "pants",
+   "expect": [
+    "스타킹 반바지"
+   ],
+   "top": 20
+  },
+  {
+   "q": "동물 귀",
+   "slot": "cap",
+   "expect": [
+    "겨울여우 머리띠",
+    "루티 귀장식",
+    "시노 귀장식"
+   ],
+   "reject": [
+    "곰순돌 후디",
+    "핑순돌 후디",
+    "햇살 여우 모자"
+   ],
+   "top": 100
+  },
+  {
+   "q": "동물 귀 모자",
+   "slot": "cap",
+   "expect": [
+    "곰순돌 후디",
+    "햇살 여우 모자"
+   ],
+   "reject": [
+    "루티 귀장식",
+    "시노 귀장식"
+   ],
+   "top": 300
+  },
+  {
+   "q": "동물 귀",
+   "slot": null,
+   "expect_slot": "cap",
+   "top": 20
+  },
+  {
+   "q": "스타킹",
+   "slot": null,
+   "expect_slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "니삭스",
+   "slot": null,
+   "expect_slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "양말 달린 한벌옷",
+   "slot": null,
+   "expect_slot": "longcoat",
+   "expect": [
+    "캠퍼스 소녀"
+   ],
+   "top": 300
+  },
+  {
+   "q": "스타킹 있는 원피스",
+   "slot": null,
+   "expect_slot": "longcoat",
+   "top": 10
+  },
+  {
+   "q": "교복",
+   "slot": "longcoat",
+   "expect": [
+    "캠퍼스 소녀",
+    "따스한 그리움"
+   ],
+   "top": 80
+  },
+  {
+   "q": "교복 목도리 체크무늬 치마",
+   "slot": "longcoat",
+   "expect": [
+    "따스한 그리움"
+   ],
+   "top": 10
+  },
+  {
+   "q": "블레이저 목도리",
+   "slot": "longcoat",
+   "expect": [
+    "따스한 그리움"
+   ],
+   "top": 20
+  },
+  {
+   "q": "니트 조끼 셔츠 교복",
+   "slot": "longcoat",
+   "expect": [
+    "캠퍼스 소녀"
+   ],
+   "top": 10
+  },
+  {
+   "q": "오피스룩",
+   "slot": "longcoat",
+   "expect": [
+    "에이스 사원"
+   ],
+   "top": 40
+  },
+  {
+   "q": "H라인 스커트",
+   "slot": "longcoat",
+   "expect": [
+    "에이스 사원"
+   ],
+   "top": 30
+  },
+  {
+   "q": "딱 붙는 일자 치마 사원증",
+   "slot": "longcoat",
+   "expect": [
+    "에이스 사원"
+   ],
+   "top": 10
+  },
+  {
+   "q": "제복 망토 짧은 바지",
+   "slot": "longcoat",
+   "expect": [
+    "베로니카 한벌옷"
+   ],
+   "top": 20
+  },
+  {
+   "q": "드레스",
+   "slot": "longcoat",
+   "top": 20
+  },
+  {
+   "q": "빨간 드레스",
+   "slot": "longcoat",
+   "top": 20
+  },
+  {
+   "q": "쎄보이는 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "강아지상",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "졸려보이는 눈",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "무쌍",
+   "slot": "face",
+   "top": 20
+  },
+  {
+   "q": "양말",
+   "slot": null,
+   "expect_slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "천사 날개",
+   "slot": "cape",
+   "expect": [
+    "아기천사 날개"
+   ],
+   "top": 30
+  },
+  {
+   "q": "악마 날개",
+   "slot": "cape",
+   "expect": [
+    "꼬마악마 날개"
+   ],
+   "top": 20
+  },
+  {
+   "q": "여우 꼬리",
+   "slot": "cape",
+   "expect": [
+    "겨울여우 꼬리"
+   ],
+   "top": 10
+  },
+  {
+   "q": "책가방",
+   "slot": "cape",
+   "expect": [
+    "파란 책가방"
+   ],
+   "top": 10
+  },
+  {
+   "q": "물총",
+   "slot": "weapon",
+   "expect": [
+    "물총"
+   ],
+   "top": 5
+  },
+  {
+   "q": "우산",
+   "slot": "weapon",
+   "expect": [
+    "핑크빈 우산",
+    "벚꽃 우산"
+   ],
+   "top": 20
+  },
+  {
+   "q": "기타",
+   "slot": "weapon",
+   "expect": [
+    "락앤롤 기타"
+   ],
+   "top": 10
+  },
+  {
+   "q": "뿔테 안경",
+   "slot": "eyeAcc",
+   "expect": [
+    "파란색 뿔테 안경"
+   ],
+   "top": 15
+  },
+  {
+   "q": "안대",
+   "slot": "eyeAcc",
+   "expect": [
+    "위생 안대"
+   ],
+   "top": 20
+  },
+  {
+   "q": "홍조",
+   "slot": null,
+   "expect_slot": "faceAcc",
+   "top": 20
+  },
+  {
+   "q": "마스크",
+   "slot": "faceAcc",
+   "expect": [
+    "아이돌 마스크 블랙"
+   ],
+   "top": 20
+  },
+  {
+   "q": "팔찌",
+   "slot": "glove",
+   "expect": [
+    "별빛 팔찌"
+   ],
+   "top": 15
+  },
+  {
+   "q": "손가락 없는 장갑",
+   "slot": "glove",
+   "expect": [
+    "텐겐의 장갑"
+   ],
+   "top": 5
+  },
+  {
+   "q": "청치마",
+   "slot": "pants",
+   "expect": [
+    "청치마 (여)"
+   ],
+   "top": 5
+  },
+  {
+   "q": "찢어진 청바지",
+   "slot": "pants",
+   "expect": [
+    "찢어진 청바지"
+   ],
+   "top": 10
+  },
+  {
+   "q": "라이더 재킷",
+   "slot": "coat",
+   "expect": [
+    "블랙 라이더 자켓"
+   ],
+   "top": 10
+  },
+  {
+   "q": "오프숄더",
+   "slot": "coat",
+   "expect": [
+    "옐로우 팝 오프숄더"
+   ],
+   "top": 10
+  },
+  {
+   "q": "운동화",
+   "slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "롱부츠",
+   "slot": "shoes",
+   "top": 20
+  }
+ ],
+ "stable": [
+  {
+   "q": "단발",
+   "slot": "hair"
+  },
+  {
+   "q": "포니테일",
+   "slot": "hair"
+  },
+  {
+   "q": "곱슬 짧은 머리",
+   "slot": "hair"
+  },
+  {
+   "q": "긴 생머리",
+   "slot": "hair"
+  },
+  {
+   "q": "똥머리",
+   "slot": "hair"
+  },
+  {
+   "q": "한쪽 묶음",
+   "slot": "hair"
+  },
+  {
+   "q": "앞머리 없는 긴 머리",
+   "slot": "hair"
+  },
+  {
+   "q": "삐죽 머리",
+   "slot": "hair"
+  },
+  {
+   "q": "고양이 귀",
+   "slot": "cap"
+  },
+  {
+   "q": "빨간 리본",
+   "slot": "cap"
+  },
+  {
+   "q": "왕관",
+   "slot": "cap"
+  },
+  {
+   "q": "헤드폰",
+   "slot": "cap"
+  },
+  {
+   "q": "천사 날개",
+   "slot": "cape"
+  },
+  {
+   "q": "꼬리",
+   "slot": "cape"
+  },
+  {
+   "q": "검은 망토",
+   "slot": "cape"
+  },
+  {
+   "q": "안경",
+   "slot": "eyeAcc"
+  },
+  {
+   "q": "선글라스",
+   "slot": "eyeAcc"
+  },
+  {
+   "q": "마스크",
+   "slot": "faceAcc"
+  },
+  {
+   "q": "부츠",
+   "slot": "shoes"
+  },
+  {
+   "q": "운동화",
+   "slot": "shoes"
+  },
+  {
+   "q": "장갑",
+   "slot": "glove"
+  },
+  {
+   "q": "후드티",
+   "slot": "coat"
+  },
+  {
+   "q": "청바지",
+   "slot": "pants"
+  },
+  {
+   "q": "치마",
+   "slot": "pants"
+  },
+  {
+   "q": "검",
+   "slot": "weapon"
+  },
+  {
+   "q": "지팡이",
+   "slot": "weapon"
+  },
+  {
+   "q": "우산",
+   "slot": "weapon"
+  },
+  {
+   "q": "파란 광선검",
+   "slot": "weapon"
+  },
+  {
+   "q": "메이드복",
+   "slot": null
+  },
+  {
+   "q": "세일러복",
+   "slot": null
+  },
+  {
+   "q": "교복",
+   "slot": null
+  },
+  {
+   "q": "한복",
+   "slot": null
+  },
+  {
+   "q": "검은 드레스",
+   "slot": null
+  },
+  {
+   "q": "토끼",
+   "slot": null
+  },
+  {
+   "q": "곰",
+   "slot": null
+  },
+  {
+   "q": "고양이",
+   "slot": null
+  },
+  {
+   "q": "웨딩드레스",
+   "slot": "longcoat"
+  },
+  {
+   "q": "수영복",
+   "slot": "longcoat"
+  },
+  {
+   "q": "정장",
+   "slot": "longcoat"
+  },
+  {
+   "q": "파자마",
+   "slot": "longcoat"
+  }
+ ]
+}
