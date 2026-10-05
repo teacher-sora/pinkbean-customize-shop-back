@@ -120,6 +120,10 @@ def lex_bonus(rows: np.ndarray, qwords: list) -> np.ndarray:
             # 왜 하나짜리를 낮게 주는가: "여우상"을 푼 낱말 중 '가늘고 긴 눈' 하나만 맞은 졸린 눈이 상위에 섞였다.
             tot = 0.0
             for g in groups:
+                if g[0].startswith("="):   # '=' 로 시작하는 묶음은 하나만 맞아도 다 맞은 것으로 친다(같은 갈래의 다른 이름)
+                    if any(" ".join(a.lstrip("=").split()) in t for a in g):
+                        tot += 1.0
+                    continue
                 hit = sum(1 for a in g if " ".join(a.split()) in t)
                 if hit:
                     tot += 0.25 + 0.75 * hit / len(g)
@@ -137,6 +141,14 @@ except Exception:
 
 
 _VOCAB_CACHE = {}
+_EMPTY = frozenset()
+# 낱말(어절) → 그 낱말이 캡션에 쓰인 부위들.
+TOKEN_SLOTS = {}
+for _i, _it in enumerate(ITEMS):
+    if WORD_NGRAMS[_i]:
+        for _x in WORD_NGRAMS[_i]:
+            if " " not in _x:
+                TOKEN_SLOTS.setdefault(_x, set()).add(_it.get("slot"))
 
 
 def vocab_for(slot) -> dict:
@@ -148,11 +160,15 @@ def vocab_for(slot) -> dict:
             m.update(VOCAB.get("*") or {})
             m.update(VOCAB.get(slot) or {})
         else:
-            # 앞에 온 부위가 이긴다(옷 → 모자 → 헤어 → 성형). 공통 사전은 맨 뒤 — 부위 사전이 더 새롭고 구체적이다.
-            for s_ in ("longcoat", "cap", "hair", "face", "pants", "*"):
+            # 앞에 온 부위가 이긴다(옷 → 신발 → 모자 → 망토 → 무기 → 장식 → 헤어 → 성형). 공통 사전은 맨 뒤 — 부위 사전이 더 새롭고 구체적이다.
+            for s_ in ("longcoat", "coat", "pants", "shoes", "cap", "cape", "weapon", "glove", "eyeAcc", "faceAcc", "hair", "face", "*"):
                 for k_, v_ in (VOCAB.get(s_) or {}).items():
-                    if s_ in ("hair", "face") and "귀" in k_:
+                    if s_ != "cap" and "귀" in k_ and "귀여" not in k_:
                         continue   # 귀는 모자 부위의 갈래 규칙이 맡는다
+                    # 다른 부위의 캡션에서도 쓰이는 낱말은 한 부위의 풀이로 바꾸지 않는다.
+                    # 왜: 망토 사전의 `동물` → `작은 동물 · 곁에 있는 것` 이 전체 검색의 "동물 귀"를 가로챘다.
+                    if s_ != "*" and (TOKEN_SLOTS.get(k_, _EMPTY) - {s_}):
+                        continue
                     m.setdefault(k_, v_)
         _VOCAB_CACHE[slot] = m
     return _VOCAB_CACHE[slot]
@@ -215,6 +231,8 @@ def _all_words(span, slot, m) -> bool:
     """구의 어절이 저마다 독립된 캡션 낱말(또는 사전의 키)이면 구로 묶지 않는다.
     왜: "양갈래 당고머리" 를 한 구로 잡으면, 두 낱말을 따로 가진 아이템이 빠진다."""
     full = SLOT_FULL.get(slot) or ()
+    if any(t in full for t in span):   # 어절 하나가 그 자체로 캡션 낱말이면("긴 양갈래"의 양갈래) 구로 좁히지 않는다
+        return True
     return all((t in full or t in m) for t in span)
 
 
@@ -228,6 +246,10 @@ def _keep_parts(c, span, slot):
         have = [a.strip() for a in c.split("|")]
         return " | ".join(have + [t for t in span if t not in have])
     return c
+
+
+# 한 글자짜리 캡션 낱말(검·창·활·총·낫·봉·책 …). 정제가 떨어뜨리면 되살린다.
+ONE_CHAR_WORDS = {w for _it in ITEMS if _it.get("tier") == "v2" for w in (_it.get("words") or []) if len(w) == 1}
 
 
 def _with_bare(key, span, slot_words):
@@ -275,7 +297,12 @@ def canon_query(words: list, slot, slot_words=()) -> list:
 
 
 _CLOTH_Q = ("원피스", "드레스", "한벌옷", "치마", "스커트", "바지", "교복", "제복", "옷", "세트", "코디")
-IS_SHOES = np.asarray([it.get("slot") == "shoes" for it in ITEMS], dtype=bool)
+# 신발 부위 가운데 **양말·스타킹인 것**(관찰 필드 kind). kind 가 없는 옛 캡션 행은 신발이면 다 넣는다.
+_SOCK_KINDS = ("양말·스타킹", "양말 신은 신발")
+IS_SHOES = np.asarray([it.get("slot") == "shoes" and (it.get("kind") is None or it.get("kind") in _SOCK_KINDS)
+                       for it in ITEMS], dtype=bool)
+# 가산이 낱말 일치 가산(0.30)보다 커야 한다: 신발 부위의 양말은 대부분 발목 높이라 `양말` 로 적히고,
+# `스타킹`·`니삭스` 낱말을 가진 것은 몇 개뿐이다. 사용자는 셋을 한 갈래로 찾는다.
 HOSE_SHOES_BONUS, HOSE_OTHER_PEN = 0.35, 0.05
 
 
@@ -388,10 +415,15 @@ def _primary_color(it):
 
 
 ITEM_PRIMARY = [_primary_color(it) for it in ITEMS]
+# 캡션에 적힌 색 전부(새 캡션). "검은 마스크"·"빨간 테 안경"처럼 색을 말한 질의는 대표색 하나가 아니라
+# 캡션이 적은 색(부분의 색 포함)으로 맞춘다.
+ITEM_CAPCOLORS = [(set().union(*[canon_colors(w) for w in (it.get("words") or [])]) if it.get("tier") == "v2" else None)
+                  for it in ITEMS]
 COLOR_BONUS, COLOR_PEN = 0.15, 0.12
 # 거리 임계: 개념 질의에서 top1 코사인의 이 비율 미만인 후보는 "무관"으로 컷(개수 채우기 방지).
 # 쿼리마다 코사인 절대값이 달라 상대비율이 안전. 0.72 = 최상위와 비슷하게 가까운 것만 남김.
 DIST_RATIO = 0.72
+NO_LEX_CAP = 12   # 낱말이 하나도 맞지 않은 질의에서 돌려주는 최대 개수
 # 전체 검색 슬롯-관련도 게이트: 슬롯 최상위가 전역 최상위의 이 비율 이상일 때만 그 슬롯을 포함.
 # 교차슬롯 개념(스타킹: 바지/한벌옷/신발 모두)은 여러 슬롯이 통과, 단일슬롯 개념(총: 무기만)은 하나만.
 SLOT_GATE = 0.62
@@ -416,9 +448,22 @@ _WTYPE_QUERY = {'총': '총', '권총': '총', '엽총': '총', '검': '검', '�
                 '너클': '너클', '부채': '부채', '석궁': '활'}
 
 
+_WKIND = {"검·칼": "검", "창·긴 자루": "창", "활·석궁": "활", "총": "총", "둔기": "둔기", "지팡이·봉": "지팡이"}
+
+
 def _weapon_type(it):
     if it.get("slot") != "weapon":
         return None
+    if it.get("kind") is not None:   # 새 캡션: 관찰한 갈래가 낱말 끝 글자 추측보다 정확하다('물총'은 총, '꽃다발 지팡이'는 소품)
+        fam = _WKIND.get(it["kind"])
+        if fam:
+            return fam
+        if it["kind"] in ("도끼·낫", "그 밖의 무기"):
+            w0 = (it.get("words") or [""])[0]
+            for k, f in _WTYPE.items():
+                if w0 == k or w0.endswith(k):
+                    return f
+        return "기타"   # 무기가 아닌 것 — 무기 종류 질의에서는 감점된다
     words = it.get("words") or []
     for w in ([words[0]] + words if words else []):  # 첫 토큰(형태) 우선
         for k, fam in _WTYPE.items():
@@ -591,9 +636,11 @@ REFINE_SYSTEM = (
 # 임베딩에서 뺄 "순수 부위어"(캡션에 거의 안 쓰이는 카테고리 명칭)만. 원피스/드레스/바지/치마 같은
 # **형태를 지칭하는 말은 캡션 토큰이라 빼지 않는다**(빼면 '검정 원피스'가 '검정'만 남아 개념이 사라짐).
 SLOT_WORDS = {
-    "hair": ("헤어", "머리"), "face": ("성형", "눈매", "눈", "얼굴"), "cap": ("모자",), "faceAcc": ("얼굴장식",),
-    "eyeAcc": ("눈장식", "안경"), "coat": ("상의",), "longcoat": (),
-    "pants": ("하의",), "shoes": ("신발",), "glove": ("장갑",), "cape": ("망토",),
+    "hair": ("헤어", "머리"), "face": ("성형", "눈매", "눈", "얼굴"), "cap": (), "faceAcc": ("얼굴장식",),
+    "eyeAcc": ("눈장식",), "coat": ("상의",), "longcoat": (),
+    # 모자·안경·장갑·망토는 부위 이름이면서 그 부위 안의 **갈래 이름**이기도 하다(모자 부위에는 귀·핀·후광이,
+    # 망토 부위에는 날개·꼬리·가방이 함께 있다) → 떼지 않는다. 떼면 "왕의 망토"에 날개가 나온다.
+    "pants": ("하의",), "shoes": ("신발",), "glove": (), "cape": (),
     "weapon": ("무기",),
 }
 
@@ -698,20 +745,16 @@ _CLOTH_ROWS = np.concatenate([SLOT_ROWS.get(s_, np.zeros(0, dtype=np.int64)) for
 _NEG_MARKERS = ("없는", "없고", "없이", "없음", "않은", "않는", "아닌", "빼고", "제외", "말고")
 # 묶음류는 캡션 토큰이 여러 형태(트윈테일/포니테일/번/당고…)라 계열로 확장한다. 나머지는 낱말 그대로 제외.
 _NEG_TIE = ("묶음", "묶은", "포니테일", "포니", "트윈테일", "트윈", "양갈래", "당고", "올림머리", "올림", "땋", "반묶", "번", "꽁지")
-_NEG_LIGHT = ("하이라이트", "반짝", "빛")   # 눈동자의 빛 점
-_NEG_FAMILY = {"묶음": _NEG_TIE, "묶은": _NEG_TIE, "묶": _NEG_TIE, "트윈": _NEG_TIE, "포니": _NEG_TIE,
-               "하이라이트": _NEG_LIGHT, "빛": _NEG_LIGHT}
+_NEG_FAMILY = {"묶음": _NEG_TIE, "묶은": _NEG_TIE, "묶": _NEG_TIE, "트윈": _NEG_TIE, "포니": _NEG_TIE}
 # 낱말 자체가 "~이 없다"는 뜻인 것. 캡션은 없는 것을 적지 않으므로, 그 특징을 가진 아이템을 빼는 것으로 찾는다.
-_NEG_IMPLICIT = {"무쌍": "쌍꺼풀", "무쌍꺼풀": "쌍꺼풀", "홑꺼풀": "쌍꺼풀", "외꺼풀": "쌍꺼풀", "홑꺼풀눈": "쌍꺼풀",
-                 "생얼": "화장", "민낯": "화장", "노메이크업": "화장"}
+# (무쌍·죽은 눈은 여기 두지 않는다 — 성형 캡션이 `홑꺼풀`·`빛 없는 눈동자` 를 긍정 낱말로 갖고 있어 사전이 푼다.)
+_NEG_IMPLICIT = {"생얼": "화장", "민낯": "화장", "노메이크업": "화장"}
 
 
 def parse_negatives(q: str):
     """원문에서 '<특징> 없고/없는/아닌…' 의 <특징> 들을 뽑는다."""
     out = []
     toks = (q or "").split()
-    if any(x in (q or "") for x in ("죽은 눈", "죽은눈", "동태눈", "생기 없는 눈")):   # 눈동자에 빛 점이 없는 눈
-        out.append("하이라이트")
     for i, t in enumerate(toks):
         if t in _NEG_IMPLICIT:
             out.append(_NEG_IMPLICIT[t])
@@ -783,12 +826,16 @@ async def search(req: SearchReq):
             continue
         if any(_t.endswith(m_) for m_ in _NEG_MARKERS) or _t in neg_terms:
             continue
-        if _t in _vk or _t in KNOWN_TOKENS:
+        if _t in _vk or _t in KNOWN_TOKENS or _t in ONE_CHAR_WORDS:
             words.append(_t)
     _pre, _used = phrase_hits(q, _lk, _sw)
     if _pre:
         words = [w for w in words if not all(t in _used for t in w.split())]
     words = (_pre + [c for c in canon_query(words, _lk, _sw) if c not in _pre]) or words
+    # 사전이 통째로 푼 구 안의 "없는"은 부정이 아니다("손가락 없는 장갑" → 반장갑, "굽 없는 신발" → 납작한 신발).
+    if neg_terms and _used:
+        neg_terms = [t for t in neg_terms if t not in _used]
+        neg_ex = neg_exclude_tokens(neg_terms) if neg_terms else set()
     qcolors = canon_colors(" ".join(words)) | canon_colors(q)
     concept_words = [w for w in words if not canon_colors(w)]
     embed_words = concept_words or words           # 순수 색 질의면 색 자체로 임베딩
@@ -797,6 +844,13 @@ async def search(req: SearchReq):
     if not cleaned:   # 부정어만 있는 질의("하이라이트 없는 눈")는 낱말이 다 빠진다 → 원문에서 부정 표지만 떼고 쓴다
         cleaned = " ".join(w for w in q.split() if w not in _NEG_MARKERS) or q
     color_strong = not concept_words               # 개념 없이 색만 → 색 강하게
+    # 부위를 말하지 않은 스타킹·니삭스·양말은 한 갈래로 본다(낱말 일치에서만). 왜: 신발 부위의 양말은 대부분
+    # 발목 높이라 `양말` 로만 적혀 있어, "스타킹" 으로 찾으면 낱말이 맞지 않아 거리 컷에서 잘린다.
+    _HOSE = ("스타킹", "니삭스", "양말", "타이츠", "팬티스타킹")
+    lex_words = embed_words
+    if (not req.slot and not _named0 and not any(c in q for c in _CLOTH_Q)
+            and any(h in q for h in _HOSE)):
+        lex_words = [("=스타킹 | 니삭스 | 양말" if any(h in w for h in _HOSE) and "|" not in w else w) for w in embed_words]
     t_refine = time.time() - t0
 
     t1 = time.time()
@@ -829,7 +883,7 @@ async def search(req: SearchReq):
         return {"query": q, "slot": slot, "count": 0, "results": []}
     # 점수 = 캡션 벡터 코사인 + 이름 부분일치 가산점 (검색 근거는 이 둘뿐)
     # 이름은 정제문·원문 **둘 다**로 본다 — 정제가 이름을 쪼개거나 부위를 떼어내도 이름 검색이 죽지 않도록.
-    base = cosine(rows, qv) + lex_bonus(rows, embed_words)  # 개념 코사인 + 낱말 일치(새 캡션만)
+    base = cosine(rows, qv) + lex_bonus(rows, lex_words)  # 개념 코사인 + 낱말 일치(새 캡션만)
     nb = np.maximum(name_bonus_for(rows, cleaned), name_bonus_for(rows, detect_gender(q)[1]))
     wq = weapon_query_type(cleaned)  # 무기 타입 질의(총/검/창...) — 색토큰이 빠진 cleaned 기준
     # 무기 타입 가산을 "관련도"에 미리 반영: 총류는 임베딩 코사인이 낮아도 거리컷에 안 잘리게.
@@ -852,6 +906,12 @@ async def search(req: SearchReq):
     #   (예: 전체 '스타킹'에서 바지뿐 아니라 한벌옷/신발 스타킹도). 이름매칭 항상 포함. 순수 색 질의는 컷 안 함.
     if concept_words and len(rel):
         keep = (nb > 0)
+        # ★ 낱말 일치의 단(段)으로 자른다: 가장 많이 맞은 아이템의 60% 에 못 미치게 맞은 것은 버린다.
+        #   두 낱말 질의면 둘 다, 세 낱말이면 둘 이상 맞아야 남는다. 왜: "꽃 장식 검"에 꽃만 맞는 우산·꽃다발이,
+        #   "기계 날개"에 빛 날개가 상위를 채웠다. 맞는 것이 적으면 적게 돌려준다(개수를 채우지 않는다).
+        _lx = lex_bonus(rows, lex_words)
+        _lmax = float(_lx.max()) if len(_lx) else 0.0
+        _tier = (_lx >= 0.6 * _lmax) if _lmax > 0 else None
         if has_slot:
             keep = keep | (rel >= float(rel.max()) * DIST_RATIO)
         else:
@@ -862,9 +922,23 @@ async def search(req: SearchReq):
                 smax = float(rel[m].max())
                 if smax >= gtop * SLOT_GATE:   # 이 슬롯 최상위가 전역 최상위와 견줄 만할 때만 슬롯 포함
                     keep = keep | (m & (rel >= smax * DIST_RATIO))    # 포함된 슬롯 안에서 상대임계
+        if _tier is not None and int((keep & (_tier | (nb > 0))).sum()) >= 1:
+            keep = keep & (_tier | (nb > 0))
+        elif _tier is None and bool(IS_V2[rows].all()) and int(keep.sum()) > NO_LEX_CAP:
+            # 낱말이 하나도 맞지 않았다(캡션에도 사전에도 없는 말) → 임베딩이 가깝다고 본 것 몇 개만 보여 준다.
+            _ord = np.argsort(-np.where(keep, rel, -9.0))[:NO_LEX_CAP]
+            keep = np.zeros(len(rows), dtype=bool)
+            keep[_ord] = True
+        # 색을 말한 질의("검은 마스크")는, 그 색이 캡션에 적힌 아이템이 남아 있으면 그것만 남긴다(새 캡션 행에 한해).
+        # 왜: 색은 말했을 때만 찾아 주기로 했다 — 말했는데 다른 색 마스크가 섞이면 안 된다.
+        if qcolors and keep.any():
+            _cm = np.fromiter(((ITEM_CAPCOLORS[r] is None) or bool(ITEM_CAPCOLORS[r] & qcolors) for r in rows.tolist()),
+                              dtype=bool, count=len(rows))
+            if int((keep & _cm).sum()) >= 1:
+                keep = keep & _cm   # 이름이 맞아도 색이 다르면 뺀다("검은 마스크"에 이름만 마스크인 빨간 마스크)
         if keep.any():
             rows = rows[keep]
-            base = cosine(rows, qv) + lex_bonus(rows, embed_words)
+            base = cosine(rows, qv) + lex_bonus(rows, lex_words)
             nb = np.maximum(name_bonus_for(rows, cleaned), name_bonus_for(rows, detect_gender(q)[1]))
     scores = base + NAME_BONUS * nb
     # 남성 스타킹 후순위: '스타킹'류는 여성 연상어. 성별 지정이 없으면 남성(gender==0) 아이템을 소폭 감점.
@@ -894,9 +968,24 @@ async def search(req: SearchReq):
     # 색-매칭: 색은 2차. 개념+색이면 약하게, 순수 색이면 강하게. 대표색 계열 일치 가산/불일치 감점.
     if qcolors:
         qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcolors])
-        cb, cp = (COLOR_BONUS, COLOR_PEN) if color_strong else (0.12, 0.08)   # 색은 2차(염색으로 바뀐다) — 말했을 때만, 형태보다 약하게
+        cb, cp = (COLOR_BONUS, COLOR_PEN) if color_strong else (0.15, 0.10)   # 색은 2차(염색으로 바뀐다) — 말했을 때만, 형태보다 약하게
+        _ctoks = {t for t in cleaned.split() if len(t) >= 2}
+        def _cadj(r):
+            cc = ITEM_CAPCOLORS[r]
+            if cc is not None:
+                # 새 캡션: 말한 색이 **그 물건 자체의 색**이면 가산 — 대표색이 그 색이거나, 캡션의 한 낱말 안에
+                # 색과 질의 낱말이 함께 있을 때("빨간 미니 드레스"). 부분의 색일 뿐이면("검은 드레스 · 빨간 리본") 0.
+                if cc & qcolors:
+                    if ITEM_PRIMARY[r] in qcolors:
+                        return cb
+                    for w in (ITEMS[r].get("words") or []):
+                        if (canon_colors(w) & qcolors) and any(t in w.split() for t in _ctoks):
+                            return cb
+                    return 0.0
+                return 0.0 if ITEM_PRIMARY[r] in qfam else -cp
+            return cb if (ITEM_PRIMARY[r] in qfam) else (-cp if ITEM_PRIMARY[r] else 0.0)
         adj = np.fromiter(
-            ((cb if (ITEM_PRIMARY[r] in qfam) else (-cp if ITEM_PRIMARY[r] else 0.0))
+            (_cadj(r)
              for r in rows.tolist()),
             dtype=np.float32, count=len(rows),
         )

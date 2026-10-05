@@ -311,6 +311,157 @@
    "q": "무쌍",
    "slot": "face",
    "top": 20
+  },
+  {
+   "q": "양말",
+   "slot": null,
+   "expect_slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "천사 날개",
+   "slot": "cape",
+   "expect": [
+    "아기천사 날개"
+   ],
+   "top": 30
+  },
+  {
+   "q": "악마 날개",
+   "slot": "cape",
+   "expect": [
+    "꼬마악마 날개"
+   ],
+   "top": 20
+  },
+  {
+   "q": "여우 꼬리",
+   "slot": "cape",
+   "expect": [
+    "겨울여우 꼬리"
+   ],
+   "top": 10
+  },
+  {
+   "q": "책가방",
+   "slot": "cape",
+   "expect": [
+    "파란 책가방"
+   ],
+   "top": 10
+  },
+  {
+   "q": "물총",
+   "slot": "weapon",
+   "expect": [
+    "물총"
+   ],
+   "top": 5
+  },
+  {
+   "q": "우산",
+   "slot": "weapon",
+   "expect": [
+    "핑크빈 우산",
+    "벚꽃 우산"
+   ],
+   "top": 20
+  },
+  {
+   "q": "기타",
+   "slot": "weapon",
+   "expect": [
+    "락앤롤 기타"
+   ],
+   "top": 10
+  },
+  {
+   "q": "뿔테 안경",
+   "slot": "eyeAcc",
+   "expect": [
+    "파란색 뿔테 안경"
+   ],
+   "top": 15
+  },
+  {
+   "q": "안대",
+   "slot": "eyeAcc",
+   "expect": [
+    "위생 안대"
+   ],
+   "top": 20
+  },
+  {
+   "q": "홍조",
+   "slot": null,
+   "expect_slot": "faceAcc",
+   "top": 20
+  },
+  {
+   "q": "마스크",
+   "slot": "faceAcc",
+   "expect": [
+    "아이돌 마스크 블랙"
+   ],
+   "top": 20
+  },
+  {
+   "q": "팔찌",
+   "slot": "glove",
+   "expect": [
+    "별빛 팔찌"
+   ],
+   "top": 15
+  },
+  {
+   "q": "손가락 없는 장갑",
+   "slot": "glove",
+   "expect": [
+    "텐겐의 장갑"
+   ],
+   "top": 5
+  },
+  {
+   "q": "청치마",
+   "slot": "pants",
+   "expect": [
+    "청치마 (여)"
+   ],
+   "top": 5
+  },
+  {
+   "q": "찢어진 청바지",
+   "slot": "pants",
+   "expect": [
+    "찢어진 청바지"
+   ],
+   "top": 10
+  },
+  {
+   "q": "라이더 재킷",
+   "slot": "coat",
+   "expect": [
+    "블랙 라이더 자켓"
+   ],
+   "top": 10
+  },
+  {
+   "q": "오프숄더",
+   "slot": "coat",
+   "expect": [
+    "옐로우 팝 오프숄더"
+   ],
+   "top": 10
+  },
+  {
+   "q": "운동화",
+   "slot": "shoes",
+   "top": 20
+  },
+  {
+   "q": "롱부츠",
+   "slot": "shoes",
+   "top": 20
   }
  ],
  "stable": [

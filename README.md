@@ -35,8 +35,8 @@ POST /rate     { "items": [{ "slot", "name", "id" }], "tone": 12, "history": ["�
 1. 질의를 LLM 으로 정제(낱말 나열 + 부위·성별 분리). 길이·위치·개수와 **인상 낱말**(차가운, 날카로운 …)은 남긴다.
 2. 낱말을 `vocab.json` 으로 캡션 낱말로 바꾼다(트윈테일 → 양갈래, 쎈 → 사나운 · 날카로운 · 올라간 눈꼬리). 원문의 구를 먼저 맞추고(`웃는 눈`, `일자 눈썹`), 정제가 떨어뜨린 낱말은 되살린다.
 3. 색 낱말을 뺀 나머지를 임베딩해 코사인을 낸다. 새 방식 캡션에는 **낱말 일치 가산**(질의 낱말이 캡션에 어절 경계로 그대로 있는 비율 × 0.30)을 더한다.
-4. 1위 점수의 72% 에 못 미치는 것은 버린다. 개념 질의는 **남은 것을 전부** 돌려준다(상한 300). `topK` 는 순수 색 질의에만 쓰인다.
-5. 재정렬: 이름 일치, 색(말했을 때만, 형태보다 약하게), 무기 타입, 귀의 갈래(`ear_adjust` — "동물 귀"=귀 장식 / "동물 귀 모자"=귀 달린 모자·후드), 스타킹류의 갈래(`hose_adjust` — 부위를 말하지 않으면 신발 먼저), 최신도(`recency`, 상한 0.03).
+4. 1위 점수의 72% 에 못 미치는 것은 버린다. **낱말 일치의 단**으로도 자른다 — 가장 많이 맞은 아이템의 60% 에 못 미치게 맞은 것은 버린다(두 낱말 질의면 둘 다 맞아야 남는다). 낱말이 하나도 맞지 않으면 12개만. 색을 말했으면 그 색이 캡션에 적힌 것만. 개념 질의는 **남은 것을 전부** 돌려준다(상한 300). `topK` 는 순수 색 질의에만 쓰인다.
+5. 재정렬: 이름 일치, 색(말했을 때만, 형태보다 약하게), 무기 타입, 귀의 갈래(`ear_adjust` — "동물 귀"=귀 장식 / "동물 귀 모자"=귀 달린 모자·후드), 스타킹류의 갈래(`hose_adjust` — 부위를 말하지 않으면 갈래가 양말·스타킹인 신발 먼저), 무기 종류(관찰한 `kind`), 최신도(`recency`, 상한 0.03).
 
 규칙
 - "리본 없는" 같은 부정어는 코드로 파싱해 그 특징을 가진 아이템을 후보에서 뺀다.
@@ -53,11 +53,11 @@ QWEN_API_KEY=... uvicorn app:app --port 8080
 ## 데이터를 바꿀 때
 ```bash
 python build/snapshot.py take --base https://pinkbean-customize-shop-back.fly.dev --out before.json   # 운영의 지금 결과
-python build/embed_apply.py --slots hair,face,longcoat,cap --legs pants  # 정본 → data/ (다른 부위가 바이트 단위로 같은지 검사한다). 모자의 kind·has_ears 도 meta 로 옮긴다
+python build/embed_apply.py --slots <바뀐 부위,…>                        # 정본 → data/ (다른 부위가 바이트 단위로 같은지 검사한다). kind·has_ears·type 도 meta 로 옮긴다. 12부위 모두 새 방식이다
 python build/recency.py --times META_TIMES.txt --slots-dir <CDN slots 폴더>
 QWEN_API_KEY=... uvicorn app:app --port 8080                            # 로컬에서 띄우고
 python build/snapshot.py take --base http://127.0.0.1:8080 --out after.json
-python build/snapshot.py diff before.json after.json --changed hair,face,longcoat,cap  # "통과"가 나와야 배포한다
+python build/snapshot.py diff before.json after.json --changed <바뀐 부위,…>  # "통과"가 나와야 배포한다
 ```
 `meta.json` 의 `items` 순서와 벡터 행 순서는 반드시 같아야 한다. 신규 아이템은 뒤에 덧붙인다.
 DashScope 키는 운영 검색과 같은 키다 — 임베딩 호출은 순차로, 한 번에 10건씩만 보낸다.
