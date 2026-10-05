@@ -7,3 +7,4 @@ venv/
 *.log
 .DS_Store
 # data/ (vectors_*.npy, meta.json) 는 배포 페이로드 → 커밋함
+build/.embcache.json
