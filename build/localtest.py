@@ -1,7 +1,7 @@
-"""로컬 검증: DashScope 임베딩 리전 확인 + 검색 스모크 테스트. (키는 env 로만)"""
+"""로컬 확인: DashScope 임베딩이 되는지 + 검색 스모크 테스트. 실제 API 를 몇 번 부른다."""
 import asyncio, os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import app as A
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dashscope import app as A  # noqa: E402  (키 적재 포함)
 
 
 async def main():
