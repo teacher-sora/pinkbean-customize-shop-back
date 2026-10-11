@@ -3,7 +3,7 @@
 
   python build/recency.py --times META_TIMES.txt [--slots-dir DIR]
 
-왜: id 가 높다고 최신이 아니다. 낮은 id 로 나온 신상품이 적지 않다(사용자 지적, 2026-10-04).
+왜: id 가 높다고 최신이 아니다. 낮은 id 로 나온 신상품이 적지 않다.
 최신도 = max( 부위 안 id 백분위 , 패치 반영 시각 점수 , 출시 순번(sn) 백분위 )
   · 패치 반영 시각: R2 `meta/{id}.json` 의 수정 시각. 이관 기준일(BASELINE) 뒤에 들어온 것은 id 와 무관하게 최신으로 본다.
     META_TIMES.txt 는 `rclone lsf r2:<버킷>/meta --files-only --format "tp" --separator ";"` 의 출력이다.
@@ -17,7 +17,7 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(os.path.dirname(HERE), "data")
-BASELINE = "2026-07-20"   # 이 날짜 뒤에 반영된 meta 는 패치 신규분이다
+BASELINE = "2026-07-20"   # CDN 을 처음 채운 날. 이 날짜 뒤에 반영된 meta 는 패치 신규분이다(바꾸지 않는다)
 SLOTS = ("hair", "face", "weapon")
 
 ap = argparse.ArgumentParser()

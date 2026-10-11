@@ -4,7 +4,7 @@ primary_region = 'nrt'  # 도쿄(한국 최근접) → 지연 최소
 [build]
 
 [env]
-  WEB_CONCURRENCY = '1'   # 저트래픽 검색 API — 1워커로 충분(임베딩은 async I/O라 단일워커도 동시처리).
+  WEB_CONCURRENCY = '1'   # 저트래픽 검색 API — 1워커(512MB 에 맞춘 값). 외부 호출은 async 라 기다리는 동안 다른 요청을 받는다.
 
 [http_service]
   internal_port = 8080

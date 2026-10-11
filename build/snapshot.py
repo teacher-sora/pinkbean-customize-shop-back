@@ -3,7 +3,7 @@
 
   python build/snapshot.py take  --base https://pinkbean-customize-shop-back.fly.dev --out before.json
   python build/snapshot.py take  --base http://127.0.0.1:8080 --out after.json
-  python build/snapshot.py diff  before.json after.json [--changed hair,face]
+  python build/snapshot.py diff  before.json after.json --changed hair,face
 
 diff 가 보는 것
   · checks: expect(상위 N 안에 있어야 함) · reject(있으면 안 됨) · expect_slot(전체 검색에서 그 부위가 다수인가)
@@ -108,7 +108,7 @@ if __name__ == "__main__":
     ap.add_argument("files", nargs="*")
     ap.add_argument("--base")
     ap.add_argument("--out")
-    ap.add_argument("--changed", default="hair,face", help="이번에 의도적으로 바꾼 부위(최신 가산을 바꿨다면 weapon 도)")
+    ap.add_argument("--changed", default="", help="이번에 의도적으로 바꾼 부위를 쉼표로(최신 가산을 바꿨다면 weapon 도). 비우면 모든 부위가 전과 같아야 한다")
     a = ap.parse_args()
     if a.mode == "take":
         take(a.base, a.out)

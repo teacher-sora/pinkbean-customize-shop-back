@@ -6,5 +6,5 @@ venv/
 .env.local
 *.log
 .DS_Store
-# data/ (vectors_*.npy, meta.json) 는 배포 페이로드 → 커밋함
+# data/ 는 배포 이미지에 들어가는 검색 데이터라 커밋한다. captions/ 는 캡션 정본이라 커밋한다.
 build/.embcache.json

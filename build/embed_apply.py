@@ -1,7 +1,7 @@
 """
 캡션 정본(back/captions/<부위>.jsonl)을 검색 데이터(back/data/)에 반영한다.
 
-  python build/embed_apply.py --slots hair,face [--new cap,weapon] [--legs longcoat,pants] [--cache CACHE.json] [--dry]
+  python build/embed_apply.py --slots hair,face [--cache CACHE.json] [--dry]
 
 하는 일
   · meta.json: 그 부위 아이템의 words(상세 캡션)·short(짧은 캡션)를 바꾸고 tier 를 "v2" 로 적는다.
@@ -10,15 +10,18 @@
   · vectors_short_256.f16.npy + meta.short_rows: 짧은 캡션 벡터와, 그 벡터가 속한 아이템 행 번호.
     왜 둘인가: 질의는 6낱말 이하라 상세 캡션 하나만 임베딩하면 희석돼 순위가 떨어진다(짧은 것과 상세한 것 중 높은 쪽을 쓴다).
   · 다른 부위의 행(words·벡터)은 건드리지 않고, 끝에 바이트 단위로 같음을 검사한다.
+  · 행을 지우지 않는다. 정본에 없는 아이템의 행은 그대로 남는다(tier 도 그대로).
+  · 덧붙인 행에는 recency 가 없다 — 헤어·성형·무기를 넣었으면 recency.py 를 이어서 돌린다.
+  · --dry 는 아무것도 부르지도 저장하지도 않고, 바뀔 행 수와 임베딩을 새로 불러야 하는 글 수만 센다.
 
 임베딩 규격: DashScope intl · text-embedding-v4 · 256차원 · 낱말을 공백으로 이은 글 · L2 정규화 · float16.
-키는 운영 검색과 같은 키라 순차로 10건씩만 보낸다.
+키는 운영 검색과 같은 키라 순차로 10건씩만 보낸다. 부른 글은 캐시(build/.embcache.json, 커밋 안 함)에 남겨 다시 부르지 않는다 —
+캐시가 없는 새 컴퓨터에서는 짧은 캡션 전체(아이템 수만큼)와 그 부위의 상세 캡션을 한 번 다시 부른다.
 """
 import argparse
 import asyncio
 import json
 import os
-import re
 import sys
 
 import numpy as np
@@ -26,14 +29,10 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACK = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from evalsearch import Cache, embed_docs, app  # noqa: E402  (키 적재와 임베딩 호출을 같이 쓴다)
+from dashscope import Cache, embed_docs, missing  # noqa: E402  (키 적재와 임베딩 호출)
 
 DATA = os.path.join(BACK, "data")
 CAPS = os.path.join(BACK, "captions")
-
-
-LEG_OLD = re.compile("스타킹|니삭스|양말|타이츠|삭스|레깅스|신발 포함")
-LEG_NEW = re.compile("스타킹|니삭스|양말|신발 포함")
 
 
 def gender_of(name):
@@ -44,15 +43,11 @@ def gender_of(name):
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slots", default="", help="캡션 전체를 정본으로 바꿀 부위")
-    ap.add_argument("--new", default="", help="정본에만 있는(검색 데이터에 아직 없는) 아이템만 덧붙일 부위 — 전량 재캡션 전인 부위의 패치 신규분")
-    ap.add_argument("--legs", default="", help="다리 낱말만 정본으로 바꿀 부위(longcoat,pants)")
     ap.add_argument("--cache", default=os.path.join(BACK, "build", ".embcache.json"))
-    ap.add_argument("--dry", action="store_true", help="저장하지 않고 바뀔 내용만 센다")
+    ap.add_argument("--dry", action="store_true", help="부르지도 저장하지도 않고 바뀔 내용만 센다")
     a = ap.parse_args()
     slots = [s for s in a.slots.split(",") if s]
-    legs = [s for s in a.legs.split(",") if s]
-    new_only = [s for s in a.new.split(",") if s]
-    touched = set(slots) | set(legs) | set(new_only)
+    touched = set(slots)
 
     meta = json.load(open(os.path.join(DATA, "meta.json"), encoding="utf-8"))
     items = meta["items"]
@@ -64,34 +59,12 @@ async def main():
 
     row_of = {it["id"]: i for i, it in enumerate(items)}
 
-    # --legs: 그 부위는 캡션 전체를 바꾸지 않고 **다리 낱말만** 정본의 것으로 바꾼다(스타킹·니삭스·양말·신발 포함).
-    # 왜: 한벌옷·하의는 아직 전량 재캡션 전이라, 옛 캡션에 새 캡션을 섞으면 순위가 한쪽으로 쏠린다. 스타킹 판정만 먼저 바로잡는다.
-    leg_changed = []
-    for s in legs:
-        f = os.path.join(CAPS, f"{s}.jsonl")
-        for line in open(f, encoding="utf-8"):
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            if r["id"] not in row_of or r.get("legs") is None:
-                continue
-            it = items[row_of[r["id"]]]
-            new_leg = [w for w in r["caption"] if LEG_NEW.search(w)]
-            words = [w for w in it["words"] if not LEG_OLD.search(w)] + new_leg
-            if words != it["words"]:
-                it["words"] = words
-                leg_changed.append(row_of[r["id"]])
-    if legs:
-        print(f"다리 낱말만 바꾼 행 {len(leg_changed)}")
-
     caps = {}
-    for s in slots + new_only:
+    for s in slots:
         f = os.path.join(CAPS, f"{s}.jsonl")
         for line in open(f, encoding="utf-8"):
             if line.strip():
                 r = json.loads(line)
-                if s in new_only and r["id"] in row_of:
-                    continue   # 이미 있는 아이템은 건드리지 않는다(옛 캡션과 섞지 않는다)
                 caps[r["id"]] = r
     changed, added = [], []
     for cid, r in caps.items():
@@ -113,10 +86,14 @@ async def main():
     print(f"바뀐 행 {len(changed)} · 덧붙인 행 {len(added)} · 전체 {len(items)}")
 
     cache = Cache(a.cache)
-    full_text = {i: " ".join(items[i]["words"]) for i in changed + added + leg_changed}
+    full_text = {i: " ".join(items[i]["words"]) for i in changed + added}
     short_rows = [i for i, it in enumerate(items) if it.get("short")]
     short_text = {i: " ".join(items[i]["short"]) for i in short_rows}
-    vec = await embed_docs(list(full_text.values()) + list(short_text.values()), cache)
+    texts = list(full_text.values()) + list(short_text.values())
+    if a.dry:
+        print(f"임베딩을 새로 불러야 하는 글 {len(missing(texts, cache))}개(10건씩 순차) · 저장하지 않음")
+        return
+    vec = await embed_docs(texts, cache)
 
     V2 = np.zeros((len(items), dim), dtype=np.float16)
     V2[: V.shape[0]] = V
@@ -129,8 +106,6 @@ async def main():
     assert before_items == after_items and before_rows == after_rows, "다른 부위 데이터가 바뀌었다 — 저장하지 않는다"
     print("다른 부위 데이터: 바이트 단위로 동일")
 
-    if a.dry:
-        return
     meta.update({"count": len(items), "items": items, "short_rows": short_rows})
     np.save(os.path.join(DATA, f"vectors_{dim}.f16.npy"), V2)
     np.save(os.path.join(DATA, f"vectors_short_{dim}.f16.npy"), S)
