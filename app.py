@@ -1088,8 +1088,8 @@ async def rate(req: RateReq):
         if meta and meta.get("words"):
             line += f" — {', '.join(meta['words'])}"
         worn.append(line)
-    # 말풍선 개수: 2개 또는 3개를 50:50 으로. 모델에 맡기면 늘 2개만 나왔다.
-    n = random.choice((2, 3))
+    # 말풍선 개수: 보통 2개, 가끔(셋에 한 번) 3개. 모델에 맡기면 늘 2개만 나왔다.
+    n = 3 if random.random() < 0.33 else 2
     parts = ["착용 코디:\n" + ("\n".join(worn) if worn else "(아무것도 안 입은 맨몸이야!)")]
     hist = [h for h in (req.history or []) if h][:6]
     if hist:
