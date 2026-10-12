@@ -18,6 +18,19 @@ AI 코디 검색·코디 평가 서버(FastAPI, Fly.io). **운영 중인 서비�
 - 로컬 서버는 8080 으로 띄우고 끝나면 끈다.
 - 임시 산출물(`before.json`·`after.json`·`META_TIMES.txt`)은 끝나면 지운다.
 
+## 시험 데이터 — Supabase 에 남기지 않는다
+
+이 레포는 Supabase 를 쓰지 않지만, 작업을 확인하느라 **사이트(운영 · dev)를 여는 순간 Supabase 에 기록이 생긴다.** Supabase(프로젝트 `pinkbean-customize`)에는 운영 데이터만 남긴다.
+
+- **사이트를 열기만 해도 익명 계정이 하나 생긴다**(코디 광장이 첫 화면 뒤에 세션을 만든다). 자동화 브라우저나 스크립트로 열 때는 **`*.supabase.co/auth/` 요청을 막고 연다**:
+  ```js
+  await page.route((u) => u.host.endsWith('supabase.co') && u.pathname.startsWith('/auth/'), (r) => r.abort())
+  ```
+  막아도 목록 · 미리보기 · 검색 · 광장 읽기는 그대로 된다. front 레포의 `pinkbean-screencheck`(`shots.mjs`)는 기본으로 막는다.
+- **글 · 댓글 · 좋아요를 만드는 시험은 dev 사이트에서만 한다.** 운영 사이트에서는 읽기만 한다.
+- **`main` 에 병합할 때마다 dev 데이터를 지운다**: front 레포에서 `node scripts/clean-test-data.mjs` 로 세어 보고 `--apply` 로 지운다(dev 광장의 모든 행 · dev 그림 · 자동화로 생긴 익명 계정. 운영 데이터는 그대로. 키는 `SUPABASE_TOKEN`). 병합 없이 끝나는 작업도 계정이나 글을 만들었으면 끝에 돌린다.
+- front 레포나 키가 없어 지우지 못했으면 **무엇이 남았는지 보고한다** — 남긴 채로 끝났다고 하지 않는다.
+
 ## 하지 말 것
 
 - **임베딩 호출을 병렬로 바꾸지 않는다.** 키가 운영 검색과 같다 — 한도를 넘기면 운영 검색이 실패한다(순차, 10건씩).
