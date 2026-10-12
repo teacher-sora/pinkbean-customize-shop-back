@@ -39,7 +39,9 @@ PINKBEAN_SYSTEM = (
     "\"흥, 이름값 같은 게 뭐가 중요해? 재밌으면 그만이지!\" / \"우와, 이 옷 어디서 났어? 나도 입어보고 싶다!\"\n"
     "사용자가 꾸민 캐릭터의 코디(착용 아이템)를 보고, 핑크빈이 그 자리에서 문득 떠오른 대로 '툭 던지는 혼잣말·감상'을 해줘. "
     "점수를 매기거나 심사하듯 평가하는 게 아니라, 코디를 구경하다가 자연스럽게 튀어나오는 반응이야.\n"
-    "반드시 JSON 으로만 답해: {\"bubbles\": [\"...\", \"...\"]}\n"
+    "반드시 JSON 으로만 답해: {\"bubbles\": [{\"s\": \"부위\", \"t\": \"말\"}, {\"s\": \"부위\", \"t\": \"말\"}]}\n"
+    "- s 는 그 말을 할 때 **보고 있는 부위**다. 착용 코디에 적힌 부위 이름(헤어, 모자, 신발 …) 가운데 하나를 그대로 적어라. "
+    "코디 전체를 두고 하는 말이면 빈 문자열.\n"
     "- bubbles 개수는 사용자 메시지에 적힌 수를 **정확히** 지켜라.\n"
     "- 각 bubble 은 뜻이 자연스럽게 통하는 '완성된 한 문장'. 앞뒤 안 맞는 말이나 어색한 비유(예: 맛있겠다 했다가 맛없겠다) 금지.\n"
     "- 먹는 것에 억지로 갖다붙이지 말 것. 정말 어울릴 때만 가볍게.\n"
@@ -1004,16 +1006,27 @@ class RateReq(BaseModel):
     history: list[str] = []  # 직전에 한 말(반복 방지)
 
 
-def _extract_bubbles(text: str) -> list[str]:
-    """모델 응답에서 bubbles 리스트 추출(코드펜스/여분 텍스트 방어)."""
+def _extract_bubbles(text: str) -> list[tuple[str, str]]:
+    """모델 응답에서 (말, 보고 있는 부위) 목록을 꺼낸다(코드펜스/여분 텍스트 방어).
+    말풍선은 {"s": 부위, "t": 말} 이지만, 모델이 문자열만 줄 때도 받는다(부위는 빈 문자열)."""
+    def rows(obj) -> list[tuple[str, str]]:
+        out = []
+        for b in obj.get("bubbles", []):
+            if isinstance(b, dict):
+                t, sl = str(b.get("t") or b.get("text") or "").strip(), str(b.get("s") or b.get("slot") or "").strip()
+            else:
+                t, sl = str(b).strip(), ""
+            if t:
+                out.append((t, sl))
+        return out
     try:
-        return [str(b).strip() for b in json.loads(text).get("bubbles", []) if str(b).strip()]
+        return rows(json.loads(text))
     except Exception:
         pass
     m = re.search(r"\{.*\}", text, re.S)
     if m:
         try:
-            return [str(b).strip() for b in json.loads(m.group(0)).get("bubbles", []) if str(b).strip()]
+            return rows(json.loads(m.group(0)))
         except Exception:
             pass
     return []
@@ -1057,8 +1070,8 @@ def _unsafe(text: str) -> bool:
     return any(w in squeezed for w in _BAN_LOOSE)
 
 
-def _safe_bubbles(bubbles: list[str]) -> list[str]:
-    return [b for b in bubbles if not _unsafe(b)]
+def _safe_bubbles(bubbles: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    return [b for b in bubbles if not _unsafe(b[0])]
 
 
 @app.post("/rate")
@@ -1097,7 +1110,7 @@ async def rate(req: RateReq):
                     ],
                     "response_format": {"type": "json_object"},
                     "temperature": 0.9,
-                    "max_tokens": 300,
+                    "max_tokens": 400,
                 },
             )
             r.raise_for_status()
@@ -1106,7 +1119,7 @@ async def rate(req: RateReq):
     try:
         content = await _ask()
     except Exception as e:
-        return {"bubbles": ["뀨…? 지금은 좀 부끄러운걸!", "이따 다시 보여줘…"], "error": str(e)[:120]}
+        return {"bubbles": ["뀨…? 지금은 좀 부끄러운걸!", "이따 다시 보여줘…"], "slots": ["", ""], "error": str(e)[:120]}
     raw = _extract_bubbles(content)
     bubbles = _safe_bubbles(raw)          # 성적·폭력적 표현이 섞인 말풍선은 버린다
     dropped = len(raw) - len(bubbles)
@@ -1121,5 +1134,11 @@ async def rate(req: RateReq):
     if len(bubbles) > n:      # 모델이 개수를 어기면 코드로 맞춘다
         bubbles = bubbles[:n][:3]
     if not bubbles:
-        bubbles = ["뀨? 뭔가 신기한 코디인데?", "부농부농! 마음에 들어!"]
-    return {"bubbles": bubbles, "model": RATE_MODEL, "dropped": dropped}
+        bubbles = [("뀨? 뭔가 신기한 코디인데?", ""), ("부농부농! 마음에 들어!", "")]
+    # slots = 말마다 핑크빈이 보고 있는 부위(프런트의 부위 키. 입지 않은 부위나 모르는 이름이면 빈 문자열).
+    # bubbles 와 같은 순서, 같은 길이다. 화면은 이것으로 그 부위의 아이템을 말 옆에 보여 준다.
+    worn_slots = {it.slot for it in req.items if it.name}
+    ko_slot = {v: k for k, v in SLOT_KO.items()}
+    slots = [sl if sl in worn_slots else ko_slot.get(sl, "") for _, sl in bubbles]
+    slots = [sl if sl in worn_slots else "" for sl in slots]
+    return {"bubbles": [t for t, _ in bubbles], "slots": slots, "model": RATE_MODEL, "dropped": dropped}
