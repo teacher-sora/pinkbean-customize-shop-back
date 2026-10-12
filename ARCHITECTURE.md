@@ -135,8 +135,9 @@ POST /rate     { "items": [{ "slot", "name", "id" }], "history": ["직전 말풍
 
 - **Fly.io**: 앱 `pinkbean-customize-shop-back`, 도쿄(`nrt`), shared-cpu 1개 · 512MB · 워커 1개(`fly.toml` 의 `WEB_CONCURRENCY=1`). 유휴 시 머신이 멈추고(`suspend`) 요청이 오면 다시 켜진다.
 - **dev 서버가 따로 있다**: 앱 `pinkbean-customize-shop-back-dev`(`https://pinkbean-customize-shop-back-dev.fly.dev`, 설정은 같은 `fly.toml`, 머신 1대). **`dev` 브랜치에 올리면 자동으로 배포된다**(`.github/workflows/deploy-dev.yml` — `app.py`·`data/`·`requirements.txt`·`Dockerfile`·`fly.toml` 이 바뀐 푸시만. 키는 저장소 비밀값 `FLY_API_TOKEN_DEV`, dev 앱만 배포할 수 있는 토큰이다). front 는 운영 도메인이면 운영 서버를, 그 밖(dev 사이트와 로컬)이면 dev 서버를 쓴다. 왜: 서버를 고친 것을 운영에 올리기 전에 dev 사이트에서 볼 수 있어야 한다. `QWEN_API_KEY` 는 운영과 같은 키를 쓴다(dev 에서 많이 부르면 운영 한도를 같이 쓴다).
-- **운영 서버는 손으로 배포한다**(`fly deploy`, 지시가 있을 때만). `main` 에 병합해도 자동으로 올라가지 않는다.
-- **`fly deploy` 는 지금 작업 폴더를 올린다.** 브랜치를 병합하는 것만으로는 반영되지 않고, 반대로 커밋하지 않은 것도 올라간다. 커밋과 배포를 둘 다 해야 저장소와 운영이 같다. 배포 계정은 `sora05153@gmail.com`(`fly auth whoami`) — 다르면 우회하지 말고 계정을 바꾼다.
+- **운영 서버는 `main` 브랜치에 올리면 자동으로 배포된다**(`.github/workflows/deploy-main.yml`, 같은 파일들이 바뀐 푸시만. 키는 `FLY_API_TOKEN`, 운영 앱만 배포할 수 있는 토큰이다). 그래서 **`main` 병합이 곧 운영 배포다**: 병합은 지시가 있을 때만 하고, 검색을 고쳤으면 병합 전에 `snapshot.py` 가 통과여야 한다. 두 토큰은 발급 1년 뒤 만료된다(2027-10). 만료되면 워크플로가 인증 오류로 실패한다. `fly tokens create deploy -a <앱>` 으로 다시 만들어 `gh secret set` 으로 넣는다.
+- Fly 는 Vercel 처럼 한 앱 안에서 브랜치별 미리보기를 띄우지 못한다(앱 하나에 릴리스 하나가 모든 요청을 받는다). 그래서 dev 는 앱을 따로 둔다.
+- **손으로 `fly deploy` 하지 않는다.** 지금 작업 폴더를(커밋하지 않은 것까지) 운영에 올려 저장소와 운영이 어긋난다. 워크플로를 다시 돌려야 하면 GitHub 의 Actions 에서 수동 실행한다(`workflow_dispatch`). 배포 계정은 `sora05153@gmail.com`(`fly auth whoami`) — 다르면 우회하지 말고 계정을 바꾼다.
 - 배포 뒤 `/health` 의 `count` 를 보고, 검색을 한두 번 실제로 던져 본다.
 
 | 환경변수 | 기본값 | 내용 |
