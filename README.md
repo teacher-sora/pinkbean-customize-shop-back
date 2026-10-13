@@ -41,13 +41,19 @@ python build/snapshot.py diff before.json after.json --changed <바뀐 부위,�
 
 ## 배포
 
+브랜치에 올리면 GitHub 워크플로가 배포한다(`.github/workflows/`). 손으로 `fly deploy` 하지 않는다.
+
+| 브랜치 | 서버 | 쓰는 곳 |
+|---|---|---|
+| `dev` | `pinkbean-customize-shop-back-dev.fly.dev` | dev 사이트, 로컬 |
+| `main` | `pinkbean-customize-shop-back.fly.dev` | 운영 사이트 |
+
 ```bash
-fly deploy                                # 지금 작업 폴더를 올린다(브랜치와 무관)
-fly secrets set QWEN_API_KEY=...          # 키를 바꿀 때
+fly secrets set QWEN_API_KEY=... -a <앱>   # 키를 바꿀 때(두 앱 모두)
 ```
 
-도쿄(nrt), shared-cpu 1개 · 512MB · 워커 1개. 유휴 시 머신이 멈추고 요청이 오면 다시 켜진다.
-배포 뒤 `/health` 의 `count` 를 보고 검색을 한두 번 실제로 던져 본다. 브랜치를 병합하는 것만으로는 운영이 바뀌지 않는다.
+도쿄(nrt), shared-cpu 1개, 512MB, 워커 1개. 유휴 시 머신이 멈추고 요청이 오면 다시 켜진다.
+배포 뒤 `/health` 의 `count` 를 보고 검색을 한두 번 실제로 던져 본다. `main` 병합이 곧 운영 배포다.
 
 ## 브랜치
 

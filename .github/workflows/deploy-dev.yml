@@ -1,0 +1,32 @@
+# dev 브랜치에 올리면 dev 서버(Fly 앱 pinkbean-customize-shop-back-dev)에 배포한다.
+# dev 사이트(dev.pinkbean-customize.com)가 이 서버를 쓴다. 운영 서버는 이 워크플로가 건드리지 않는다.
+# 키: 저장소 비밀값 FLY_API_TOKEN_DEV(dev 앱만 배포할 수 있는 토큰. `fly tokens create deploy -a <dev 앱>`).
+name: dev 서버 배포
+
+on:
+  push:
+    branches: [dev]
+    paths: ['app.py', 'data/**', 'requirements.txt', 'Dockerfile', 'fly.toml', '.github/workflows/deploy-dev.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # 설정은 운영과 같은 fly.toml 을 쓰고 앱 이름만 바꾼다
+      - run: flyctl deploy --remote-only --app pinkbean-customize-shop-back-dev
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEV }}
+      - name: 확인
+        run: |
+          for i in 1 2 3 4 5 6; do
+            curl -fsS https://pinkbean-customize-shop-back-dev.fly.dev/health && exit 0
+            sleep 10
+          done
+          exit 1
