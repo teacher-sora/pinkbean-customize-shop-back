@@ -1004,6 +1004,7 @@ class RateReq(BaseModel):
     items: list[RateItem] = []
     tone: int | None = None   # 쓰지 않는다. 프런트가 보내므로 받기만 한다
     history: list[str] = []  # 직전에 한 말(반복 방지)
+    recent_slots: list[str] = []  # 바로 앞 평가에서 본 부위(이번에는 다른 부위를 본다)
 
 
 def _extract_bubbles(text: str) -> list[tuple[str, str]]:
@@ -1079,7 +1080,7 @@ async def rate(req: RateReq):
     # 아이템 이름만 보내면 "윈디 헤어(여)" 처럼 생김새 정보가 없어 모델이 헤어를 무시하고
     # 이름이 튀는 옷/장식에만 반응했다(헤어를 바꿔도 같은 말이 나오던 원인).
     # → 캡션(words)을 함께 붙여 "모습"을 보고 말하게 한다.
-    worn = []
+    worn, words_of = [], {}
     for it in req.items:
         if not it.name:
             continue
@@ -1087,14 +1088,32 @@ async def rate(req: RateReq):
         meta = BY_ID.get(it.id or "")
         if meta and meta.get("words"):
             line += f" — {', '.join(meta['words'])}"
+            words_of[it.slot] = list(meta["words"])
         worn.append(line)
     # 말풍선 개수: 보통 2개, 가끔(셋에 한 번) 3개. 모델에 맡기면 늘 2개만 나왔다.
     n = 3 if random.random() < 0.33 else 2
+    # ── 매번 다른 말이 나오게: **어디를 볼지는 코드가 뽑는다.**
+    # 모델에 맡기면 같은 코디에는 늘 같은 부위의 같은 낱말을 집어 같은 말을 한다("방금 한 말"을 줘도, 온도를 높여도 그랬다).
+    # 그래서 입은 부위 가운데 볼 부위를 n 개 무작위로 뽑고(바로 앞에 본 부위는 되도록 피한다), 부위마다 생김새 낱말 둘을
+    # 무작위로 골라 "이번에 눈에 띈 것"으로 준다. 같은 코디라도 누를 때마다 다른 부위의 다른 생김새를 두고 말하게 된다.
+    worn_slots = [it.slot for it in req.items if it.name]
+    recent = set(req.recent_slots or [])
+    fresh = [sl for sl in worn_slots if sl not in recent]
+    pool = fresh if len(fresh) >= min(n, len(worn_slots)) else worn_slots
+    focus = random.sample(pool, min(n, len(pool)))
     parts = ["착용 코디:\n" + ("\n".join(worn) if worn else "(아무것도 안 입은 맨몸이야!)")]
     hist = [h for h in (req.history or []) if h][:6]
     if hist:
         parts.append("방금 한 말(겹치지 마):\n" + "\n".join(f"- {h}" for h in hist))
-    parts.append(f"말풍선 {n}개로 말해줘.")
+    if focus:
+        look = []
+        for sl in focus:
+            ws = words_of.get(sl) or []
+            hint = ", ".join(random.sample(ws, min(2, len(ws))))
+            look.append(f"- {SLOT_KO.get(sl, sl)}" + (f" (이번에 눈에 띈 것: {hint})" if hint else ""))
+        parts.append("이번에 볼 곳(이 순서로 한 마디씩, s 에는 그 부위 이름을 적어):\n" + "\n".join(look))
+    parts.append(f"말풍선 {n if len(focus) >= n or not focus else len(focus)}개로 말해줘.")
+    n = n if len(focus) >= n or not focus else len(focus)
     user = "\n\n".join(parts)
 
     async def _ask(extra: str = "") -> str:
@@ -1131,13 +1150,17 @@ async def rate(req: RateReq):
                 "옷이나 장식을 의인화할 때도 그런 비유를 쓰지 마. 밝고 귀엽게만 말해줘.")))
         except Exception:
             bubbles = []
+    # 방금 한 말과 같은 말은 버린다(글자만 비교한다 — 띄어쓰기 · 문장부호가 달라도 같은 말이다).
+    said = {_SQUEEZE.sub("", h) for h in hist}
+    kept = [b for b in bubbles if _SQUEEZE.sub("", b[0]) not in said]
+    if kept:
+        bubbles = kept
     if len(bubbles) > n:      # 모델이 개수를 어기면 코드로 맞춘다
         bubbles = bubbles[:n][:3]
     if not bubbles:
         bubbles = [("뀨? 뭔가 신기한 코디인데?", ""), ("부농부농! 마음에 들어!", "")]
     # slots = 말마다 핑크빈이 보고 있는 부위(프런트의 부위 키. 입지 않은 부위나 모르는 이름이면 빈 문자열).
     # bubbles 와 같은 순서, 같은 길이다. 화면은 이것으로 그 부위의 아이템을 말 옆에 보여 준다.
-    worn_slots = {it.slot for it in req.items if it.name}
     ko_slot = {v: k for k, v in SLOT_KO.items()}
     slots = [sl if sl in worn_slots else ko_slot.get(sl, "") for _, sl in bubbles]
     slots = [sl if sl in worn_slots else "" for sl in slots]
