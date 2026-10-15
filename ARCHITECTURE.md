@@ -20,6 +20,8 @@
 | 부르는 쪽 | front 의 `ShopContext.tsx`(`NEXT_PUBLIC_SEARCH_API` 로 바꿀 수 있다) |
 | 저장소 | `github.com/teacher-sora/pinkbean-customize-shop-{front,parser,back}` — 세 레포를 같은 폴더에 나란히 둔다 |
 
+**NEW 라벨과 '신규' 필터는 이 서버와 상관없다.** 사이트의 신규 표시는 CDN `catalog/new.json`(parser 가 패치마다 그 패치의 신규 id 로 통째로 바꾼다)만 보고 정한다. 이 서버의 최신도(`recency`, §4-2)는 헤어·성형·무기 검색 순위에 조금 더하는 값일 뿐 NEW 와 무관하다 — 신규 표시를 이 서버에서 만들지 않는다. 왜: 신규의 기준은 파서만 알고, 두 곳에서 정하면 어긋난다.
+
 아이템마다 미리 써 둔 **캡션**(보이는 특징의 낱말 나열)을 임베딩해 두고, 질의를 같은 공간에 임베딩해 브루트포스 코사인으로 찾는다. 캡션을 만드는 방법과 규칙은 parser 레포(`caption/CAPTION-METHOD/`, `ARCHITECTURE.md` §3), 패치 때의 순서는 parser 의 `RUNBOOK.md` §3 에 있다.
 
 ## 2. 구성
