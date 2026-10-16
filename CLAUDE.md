@@ -51,7 +51,7 @@ git config user.name teacher-sora
 git config user.email sora05153@gmail.com
 ```
 
-`git push` 가 403 / Repository not found 로 실패하면 `gh auth status` 를 본다. 이 PC 에는 GitHub 계정이 여럿이고, 활성 계정이 `teacher-sora` 가 아니면 그렇다. **계정을 바꾸거나 우회하지 말고 사용자에게 알린다.**
+**GitHub 작업은 `teacher-sora` 계정으로 한다.** 이 PC 에는 GitHub 계정이 여럿이다. push 전에 `gh auth status` 로 지금 활성 계정을 적어 두고, `teacher-sora` 가 아니면 `gh auth switch -u teacher-sora` 로 바꿔 작업한 뒤, **끝나면 `gh auth switch -u <적어 둔 계정>` 으로 원래대로 되돌린다**(사용자 지시). `git push` 가 403 / Repository not found 로 실패하는 것도 대개 활성 계정이 다른 탓이다.
 
 ## 문서를 고칠 때
 
