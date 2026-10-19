@@ -5,7 +5,7 @@
 
 ## 1. 한눈에
 
-메이플스토리(KMS) 캐릭터 코디 웹앱 "핑크빈 커마샵"의 **AI 코디 검색**과 **코디 평가(핑크빈 말풍선)** 서버. FastAPI, Fly.io.
+메이플스토리(KMS) 캐릭터 코디 웹앱 "핑크빈 커마샵"의 **AI 코디 검색**, **코디 평가(핑크빈 말풍선)**, **기능 안내(건의함의 질문)** 서버. FastAPI, Fly.io.
 
 ```
 로컬 WZ(게임 클라이언트)
@@ -53,6 +53,8 @@ POST /search   { "query": "세일러복 절대영역", "slot": "longcoat"|null, 
                → { query, slot, refined, count, ms{refine, embed, total}, results: [{ id, slot, name, label, isCash, gender, words, tier, score }] }
 POST /rate     { "items": [{ "slot", "name", "id" }], "history": ["직전 말풍선"], "recent_slots": ["바로 앞에 본 부위"] }
                → { bubbles: ["…"], model, dropped }
+POST /guide    { "q": "표정 바꾸는 법", "mode": "ask"|"check", "history": [{ "r": "u"|"a", "t": "…" }], "catalog": [{ "id", "t" }] }
+               → { kind: "feature"|"none"|"chat"|"error", ids: ["기능 id"], reply, model }
 ```
 
 - front 는 `/search` 를 늘 `slot: null` 로 부르고 결과의 `id`·`slot` 만 쓴다. `/rate` 에서는 `bubbles` 와 `slots` 를 쓴다.
@@ -113,6 +115,15 @@ POST /rate     { "items": [{ "slot", "name", "id" }], "history": ["직전 말풍
 - **어디를 볼지는 코드가 뽑는다.** 입은 부위 가운데 볼 부위를 말 개수만큼 무작위로 고르고(front 가 보낸 `recent_slots` — 바로 앞 평가에서 본 부위 — 는 되도록 피한다), 부위마다 생김새 낱말 둘을 무작위로 골라 "이번에 눈에 띈 것"으로 준다. 왜: 모델에 맡기면 같은 코디에는 늘 같은 부위의 같은 낱말을 집어 같은 말을 되풀이한다(`history` 를 줘도, 온도를 높여도 그랬다 — 사용자 지적). 방금 한 말과 글자가 같은 말은 버린다.
 - **말풍선 안전망**: 말은 모델이 짓기 때문에 지시문으로는 막지 못한다. 서버(`_unsafe`)가 나온 문장을 검사해 걸리면 버리고, 다 버려졌으면 한 번만 더 받는다. front(`src/lib/safeText.ts`)도 같은 규칙으로 화면 직전에 한 번 더 본다(두 쪽의 배포가 따로라서). 오탐은 말풍선 하나를 잃을 뿐이라 넉넉히 잡되, 패션에서 정상적으로 쓰는 말(노출·누드톤·로리타·벗겨·죽여주는 …)은 일부러 뺐다. **두 쪽의 낱말 목록을 함께 고친다.**
 
+## 5-1. 기능 안내 (`/guide`)
+
+- **기능 목록은 front 가 보낸다**(`front/src/lib/guide.ts` 가 정본, 질문마다 함께 온다). 왜: 기능을 더하고 옮기는 것은 front 이고, 두 곳에 두면 어긋난다. 이 서버는 목록을 따로 갖지 않는다.
+- **모델은 목록에서 고르기만 한다.** `kind` 와 `ids`(목록에 있는 id 만, 최대 2개)를 받고, front 는 고른 항목에 적힌 글을 그대로 보여 준다. `reply` 는 인사(`chat`)에 답할 때만 화면에 나온다. 왜: 모델이 없는 메뉴나 틀린 위치를 그럴듯하게 지어내면, 기능을 못 찾던 사람이 더 헤맨다.
+- `mode: "check"` 는 건의를 올리기 전의 확인이다. 바라는 일을 **지금 기능으로 할 수 있을 때만** `feature` 다. 새 표정, 새 이펙트처럼 목록에 없는 새것, 있는 기능을 고쳐 달라는 말, 오류 신고는 `none`.
+- **오류 신고는 `none`** 이다(어떤 아이템을 입었더니 사라진다, 안 보인다, 안 꺼진다 등). 지시문에 못 박았다. 왜: 불편을 기능으로 풀어 주라고만 하면 오류 신고에 '부위 숨기기' 같은 엉뚱한 기능을 권했다.
+- 모델이 `kind` 자리에 기능 id 를 적는 일이 있어(`{"kind": "image", "ids": ["image"]}`), 맞는 id 를 골랐으면 `feature` 로 본다.
+- 모델은 `GUIDE_MODEL`(기본 `qwen-flash`, 온도 0.2). 건의함에 실제로 올라온 글 22개로 시험해 21개가 맞았다(`qwen-plus` 로 바꿔도 같은 곳에서 틀려, 지시문과 목록 낱말을 고쳐 맞췄다). 질문은 300자, 대화는 앞의 6개, 목록은 60개까지만 받는다. 실패하면 `kind: "error"` 를 준다.
+
 ## 6. 알려진 상태
 
 고치려면 데이터를 바꾸고 다시 배포해야 하는 것들이다. 손대기 전에 사용자에게 알린다.
@@ -148,7 +159,7 @@ POST /rate     { "items": [{ "slot", "name", "id" }], "history": ["직전 말풍
 | `DASHSCOPE_BASE` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 계정의 리전에 맞춘다 |
 | `EMBED_MODEL` | `text-embedding-v4` | 바꾸면 벡터를 전부 다시 만들어야 한다 |
 | `EMBED_DIM` | `256` | 데이터 파일 이름에 들어간다. 256 파일만 있다 |
-| `REFINE_MODEL` · `RATE_MODEL` | `qwen-flash` | 질의 정제 · 말풍선 |
+| `REFINE_MODEL` · `RATE_MODEL` · `GUIDE_MODEL` | `qwen-flash` | 질의 정제 · 말풍선 · 기능 안내 |
 | `WEB_CONCURRENCY` | 이미지 1, `fly.toml` 1 | 워커마다 벡터 두 벌과 메타를 메모리에 올린다 |
 
 Python 3.10 이상(운영 이미지는 3.11). 의존성은 `requirements.txt` 하나다(빌드 스크립트도 그것만 쓴다).
