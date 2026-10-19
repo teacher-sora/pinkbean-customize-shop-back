@@ -4,6 +4,7 @@ pinkbean-customize-shop-back — AI 코디 검색 · 코디 평가 API
 - 기동할 때 data/ 의 벡터(정규화, float16)와 메타를 메모리에 올린다.
 - POST /search : 질의를 정제 → 캡션 낱말로 치환 → 임베딩 → 코사인 + 낱말 일치 → 거리 컷 → 재정렬.
 - POST /rate   : 착용 코디를 보고 핑크빈 말풍선을 짓는다(나온 문장은 안전망으로 거른다).
+- POST /guide  : 건의함의 기능 안내. front 가 보낸 기능 목록에서 질문에 맞는 항목을 고른다.
 - 코사인 = 내적(양쪽 정규화). 아이템 수 × 256 브루트포스라 검색 자체는 수 ms 다.
 규칙과 그 이유는 ARCHITECTURE.md 에 있다.
 """
@@ -1165,3 +1166,95 @@ async def rate(req: RateReq):
     slots = [sl if sl in worn_slots else ko_slot.get(sl, "") for _, sl in bubbles]
     slots = [sl if sl in worn_slots else "" for sl in slots]
     return {"bubbles": [t for t, _ in bubbles], "slots": slots, "model": RATE_MODEL, "dropped": dropped}
+
+
+# ── 기능 안내(POST /guide) ─────────────────────────────────────────
+# front 건의함의 '질문' 탭과 건의 등록 전 확인이 쓴다. 기능 목록(catalog)은 **front 가 보낸다**(front/src/lib/guide.ts 가 정본).
+# 모델은 목록에서 맞는 항목을 **고르기만** 한다 — 화면은 고른 항목의 글을 그대로 보여 주므로 없는 메뉴를 지어낼 수 없다.
+# reply 는 고른 항목을 이어 주는 짧은 한두 문장이고, 걸러지면 화면이 항목 글만 보여 준다.
+GUIDE_MODEL = os.environ.get("GUIDE_MODEL", "qwen-flash")
+GUIDE_SYSTEM = (
+    "너는 메이플스토리 코디 미리보기 사이트 '핑크빈 커마샵'의 안내 도우미야. 사용자의 말을 보고, 아래 '기능 목록'에서 "
+    "그 말에 답이 되는 기능을 골라 준다.\n"
+    "반드시 JSON 으로만 답해: {\"kind\": \"feature\" | \"none\" | \"chat\", \"ids\": [\"기능 id\"], \"reply\": \"말\"}\n"
+    "판단하는 법: 사용자가 **하고 싶은 일**을 한 줄로 바꿔 보고, 목록의 각 기능 설명과 낱말(/ 뒤)을 보며 그 일을 해 주는 기능이 있는지 찾아라. "
+    "낱말이 꼭 같지 않아도 하려는 일이 같으면 그 기능이다(예: '투명하게 저장' 은 이미지 저장, '작게 보고 싶다' 는 배율). "
+    "보기 설정으로 풀리는 불편(캐릭터가 커서 잘려요, 작게 보고 싶어요)은 feature 다. "
+    "어떤 아이템을 입었더니 무엇이 사라지거나, 안 보이거나, 뒤에 있거나, 색이 다르거나, 안 꺼진다는 글은 **오류 신고라 none** 이다(숨기기 같은 기능을 권하지 마라).\n"
+    "- feature: 그 일을 해 주는 기능이 목록에 있다. ids 에 그 id 를 1~2개(가장 맞는 것부터) 적고, reply 에 어디서 어떻게 하는지 "
+    "한두 문장으로 알려 줘. **목록에 적힌 내용만** 말해라. 목록에 없는 메뉴 이름, 버튼, 단계, 기능을 지어내지 마라.\n"
+    "- none: 목록의 어떤 기능으로도 그 일을 할 수 없다(아직 없는 기능, 오류 신고, 사이트와 상관없는 질문 — 날씨, 게임 공략, 잡담 등). "
+    "ids 는 [], reply 는 \"\".\n"
+    "- chat: 인사나 고맙다는 말뿐일 때만. ids 는 [], reply 에 짧게 답하고 무엇이 궁금한지 물어봐.\n"
+    "- 말투는 담백한 존댓말 '~해요'. 느낌표, 이모지, 과장 없이. reply 는 공백 포함 90자 이내.\n"
+    "- 생김새나 동작 자체를 새로 만들어 달라는 말(머리카락이 흔들리게, 새 표정 추가 등)은 비슷한 기능이 있어도 none 이다.\n"
+    "- 성적인 말, 욕설, 폭력적인 말은 쓰지 마라."
+)
+GUIDE_CHECK = (
+    "\n\n지금 들어온 말은 '건의'로 올리려는 글이다. 건의가 바라는 일을 **목록의 기능으로 지금 할 수 있으면** feature 로 답하고, "
+    "reply 는 '이미 있는 기능이에요.' 로 시작해 어디서 하는지 알려 줘. 바라는 것이 목록에 없는 새것(새 표정, 새 이펙트, 새 동작)이거나, "
+    "있는 기능을 다르게 고쳐 달라는 말이거나, 오류 신고면 none 이다."
+)
+
+
+class GuideTurn(BaseModel):
+    r: str = "u"   # u = 사용자, a = 안내
+    t: str = ""
+
+
+class GuideEntry(BaseModel):
+    id: str
+    t: str
+
+
+class GuideReq(BaseModel):
+    q: str
+    mode: str = "ask"            # ask = 질문 탭, check = 건의 등록 전 확인
+    history: list[GuideTurn] = []
+    catalog: list[GuideEntry] = []
+
+
+@app.post("/guide")
+async def guide(req: GuideReq):
+    q = (req.q or "").strip()[:300]
+    cat = [e for e in req.catalog[:60] if e.id and e.t][:60]
+    ids_ok = {e.id[:40] for e in cat}
+    if not q or not cat:
+        return {"kind": "none", "ids": [], "reply": ""}
+    lines = "\n".join(f"- {e.id[:40]}: {e.t[:400]}" for e in cat)
+    msgs = [{"role": "system", "content": GUIDE_SYSTEM + (GUIDE_CHECK if req.mode == "check" else "") + "\n\n기능 목록:\n" + lines}]
+    # 앞의 대화(짧게) — "그건 어디 있어요?" 같은 이어지는 질문을 알아듣게
+    for h in req.history[-6:]:
+        t = (h.t or "").strip()[:300]
+        if t:
+            msgs.append({"role": "assistant" if h.r == "a" else "user", "content": t})
+    msgs.append({"role": "user", "content": q})
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{DASHSCOPE_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+                json={"model": GUIDE_MODEL, "messages": msgs, "response_format": {"type": "json_object"},
+                      "temperature": 0.2, "max_tokens": 300},
+            )
+            r.raise_for_status()
+            content = r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        return {"kind": "error", "ids": [], "reply": "", "error": str(e)[:120]}
+    try:
+        m = re.search(r"\{.*\}", content, re.S)
+        d = json.loads(m.group(0) if m else content)
+    except Exception:
+        d = {}
+    ids = [i for i in (d.get("ids") or []) if isinstance(i, str) and i in ids_ok][:2]
+    # 모델이 kind 자리에 기능 id 를 적는 일이 있다({"kind": "image", "ids": ["image"]}) — 맞는 id 를 골랐으면 기능 답으로 본다
+    kind = d.get("kind") if d.get("kind") in ("feature", "none", "chat") else ("feature" if ids else "none")
+    reply = d.get("reply") if isinstance(d.get("reply"), str) else ""
+    reply = reply.strip()[:140]
+    if kind == "feature" and not ids:
+        kind = "none"
+    if kind != "feature":
+        ids = []
+    if kind == "none" or _unsafe(reply):
+        reply = ""
+    return {"kind": kind, "ids": ids, "reply": reply, "model": GUIDE_MODEL}
