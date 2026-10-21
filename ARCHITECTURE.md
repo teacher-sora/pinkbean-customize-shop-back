@@ -43,7 +43,7 @@
 | `build/dashscope.py` | 빌드 스크립트가 함께 쓰는 키 적재·임베딩 캐시·호출 |
 | `Dockerfile` · `fly.toml` | 배포. 이미지에는 `app.py` 와 `data/` 만 들어간다 |
 
-대상은 캐시 아이템 12부위다(hair, face, cap, faceAcc, eyeAcc, coat, longcoat, pants, shoes, glove, cape, weapon). 귀고리·방패·피부는 넣지 않는다(착용해도 거의 안 보인다). 헤어·성형은 색 변형 묶음의 대표 하나만.
+대상은 캐시 아이템 12부위다(hair, face, cap, faceAcc, eyeAcc, coat, longcoat, pants, shoes, glove, cape, weapon). 귀고리·방패·피부는 넣지 않는다(착용해도 거의 안 보인다). 사이트의 반지 부위(일루전 링)와 이펙트 부위(캐시 이펙트)도 넣지 않는다 — 검색 대상이 아니라서 패치 때 새로 나와도 캡션 · 임베딩하지 않는다(사용자 지시). 헤어·성형은 색 변형 묶음의 대표 하나만.
 
 ## 3. API
 
