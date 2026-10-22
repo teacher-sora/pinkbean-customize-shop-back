@@ -1175,7 +1175,7 @@ async def rate(req: RateReq):
 
 
 # ── 기능 안내(POST /guide) ─────────────────────────────────────────
-# front 건의함의 '가이드' 탭과 건의 등록 전 확인이 쓴다. 기능 목록(catalog)은 **front 가 보낸다**(front/src/lib/guide.ts 가 정본).
+# front '도움 및 가이드'의 도움 탭과 건의 등록 전 확인이 쓴다. 기능 목록(catalog)은 **front 가 보낸다**(front/src/lib/guide.ts 가 정본).
 # 모델은 목록에서 맞는 항목을 **고르기만** 한다 — 화면은 고른 항목의 글을 그대로 보여 주므로 없는 메뉴를 지어낼 수 없다.
 # reply 는 고른 항목을 이어 주는 짧은 한두 문장이고, 걸러지면 화면이 항목 글만 보여 준다.
 GUIDE_MODEL = os.environ.get("GUIDE_MODEL", "qwen-flash")
@@ -1226,7 +1226,7 @@ class GuideEntry(BaseModel):
 
 class GuideReq(BaseModel):
     q: str
-    mode: str = "ask"            # ask = 가이드 탭, check = 건의 등록 전 확인
+    mode: str = "ask"            # ask = 도움 탭, check = 건의 등록 전 확인
     history: list[GuideTurn] = []
     catalog: list[GuideEntry] = []
 
