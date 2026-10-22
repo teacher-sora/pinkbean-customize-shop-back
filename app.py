@@ -523,10 +523,11 @@ def ear_query(text: str) -> bool:
     return False
 
 
-# 검색 범위: 아래 12부위만. 귀고리(earring)·방패(shield)·피부(skin)는 착용해도 거의 안 보여 넣지 않는다.
-# 정본 캡션도 12부위뿐이지만, 잘못된 데이터가 들어와도 범위 밖이 새어 나오지 않게 한 번 더 건다.
+# 검색 범위: 캐시 12부위 + 명찰 · 말풍선. 귀고리(earring)·방패(shield)·피부(skin)는 착용해도 거의 안 보여 넣지 않는다.
+# 명찰 · 말풍선은 캐릭터와 함께 늘 보여 코디를 바꾸므로 넣는다(사용자 지시). 일루전 링 · 캐시 이펙트는 넣지 않는다.
+# 정본 캡션도 이 부위뿐이지만, 잘못된 데이터가 들어와도 범위 밖이 새어 나오지 않게 한 번 더 건다.
 CAPTION_SLOTS = {"hair", "face", "cap", "faceAcc", "eyeAcc",
-                 "coat", "longcoat", "pants", "shoes", "glove", "cape", "weapon"}
+                 "coat", "longcoat", "pants", "shoes", "glove", "cape", "weapon", "nameTag", "chatBalloon"}
 SCOPE_MASK = np.asarray([it.get("slot") in CAPTION_SLOTS for it in ITEMS], dtype=bool)
 SCOPE_ROWS = np.nonzero(SCOPE_MASK)[0]
 # id → 아이템(캡션 words 조회용). 코디 평가가 "이름"이 아니라 "생김새"를 보고 말하게 한다.
@@ -618,6 +619,8 @@ SLOT_WORDS = {
     # 망토 부위에는 날개·꼬리·가방이 함께 있다) → 떼지 않는다. 떼면 "왕의 망토"에 날개가 나온다.
     "pants": ("하의",), "shoes": ("신발",), "glove": (), "cape": (),
     "weapon": ("무기",),
+    # 명찰 · 말풍선 캡션에는 모두 그 부위 이름이 들어 있어(코드가 붙인다) 그 부위 안에서는 가르지 못한다 → 뗀다.
+    "nameTag": ("명찰", "네임택"), "chatBalloon": ("말풍선",),
 }
 
 
@@ -710,7 +713,10 @@ def health():
 
 # 사용자가 직접 말한 부위 이름 → 부위. (형태를 가리키는 말 '원피스·드레스·치마·바지'는 넣지 않는다 — 캡션 낱말이다.)
 _EXPLICIT_SLOT = (("한벌옷", "longcoat"), ("상의", "coat"), ("하의", "pants"), ("신발", "shoes"), ("얼굴장식", "faceAcc"),
-                  ("눈장식", "eyeAcc"), ("망토", "cape"), ("무기", "weapon"), ("성형", "face"), ("헤어", "hair"))
+                  ("눈장식", "eyeAcc"), ("망토", "cape"), ("무기", "weapon"), ("성형", "face"), ("헤어", "hair"),
+                  # 명찰 · 말풍선은 질의 정제의 부위 목록에 넣지 않고 여기서만 가른다(정제 지시문을 바꾸면 다른 질의의 정제가 흔들린다).
+                  # '이름표'는 넣지 않는다 — 옷 캡션의 이름표(교복 · 제복에 단 것) 14곳과 부딪힌다.
+                  ("명찰", "nameTag"), ("네임택", "nameTag"), ("말풍선", "chatBalloon"))
 _CLOTH_ROWS = np.concatenate([SLOT_ROWS.get(s_, np.zeros(0, dtype=np.int64)) for s_ in ("longcoat", "pants")])
 
 
@@ -991,7 +997,7 @@ async def search(req: SearchReq):
 SLOT_KO = {
     "hair": "헤어", "face": "성형", "cap": "모자", "faceAcc": "얼굴장식", "eyeAcc": "눈장식",
     "earring": "귀고리", "coat": "상의", "longcoat": "한벌옷", "pants": "하의", "shoes": "신발",
-    "glove": "장갑", "cape": "망토", "weapon": "무기", "shield": "방패",
+    "glove": "장갑", "cape": "망토", "weapon": "무기", "shield": "방패", "nameTag": "명찰", "chatBalloon": "말풍선",
 }
 
 
