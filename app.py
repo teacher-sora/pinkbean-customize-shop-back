@@ -954,9 +954,10 @@ async def search(req: SearchReq):
         qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcolors])
         cb, cp = (COLOR_BONUS, COLOR_PEN) if color_strong else (0.15, 0.10)   # 색은 2차(염색으로 바뀐다) — 말했을 때만, 형태보다 약하게
         _ctoks = {t for t in cleaned.split() if len(t) >= 2}
-        # 명찰 · 말풍선의 순수 색 질의("핑크 명찰")는 대표색(판 전체의 색 — parser 가 재어 첫 색 낱말로 둔다)만 본다.
-        # 왜: 색 낱말 자체가 _ctoks 에 들어가 '분홍 글자' 처럼 부분의 색만 있는 판도 다 가산을 받아, 보라 판이 맨 위에 왔다.
-        if color_strong and slot in ("nameTag", "chatBalloon"):
+        # 순수 색 질의("빨간 모자", "핑크 명찰")는 대표색(물건 전체의 색)만 본다 — 모든 부위.
+        # 왜: 낱말이 색뿐이라 색 낱말 자체가 _ctoks 에 들어가, '빨간 리본' 처럼 부분만 그 색인 것도 다 가산을 받았다
+        # (명찰에서 분홍 글자만 있는 보라 판이 맨 위에 왔다 — 사용자 지시로 모든 부위에 같게).
+        if color_strong:
             _ctoks = set()
         def _cadj(r):
             cc = ITEM_CAPCOLORS[r]
