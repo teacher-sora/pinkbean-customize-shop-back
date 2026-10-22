@@ -954,6 +954,10 @@ async def search(req: SearchReq):
         qfam = set().union(*[_FAMILY.get(c, {c}) for c in qcolors])
         cb, cp = (COLOR_BONUS, COLOR_PEN) if color_strong else (0.15, 0.10)   # 색은 2차(염색으로 바뀐다) — 말했을 때만, 형태보다 약하게
         _ctoks = {t for t in cleaned.split() if len(t) >= 2}
+        # 명찰 · 말풍선의 순수 색 질의("핑크 명찰")는 대표색(판 전체의 색 — parser 가 재어 첫 색 낱말로 둔다)만 본다.
+        # 왜: 색 낱말 자체가 _ctoks 에 들어가 '분홍 글자' 처럼 부분의 색만 있는 판도 다 가산을 받아, 보라 판이 맨 위에 왔다.
+        if color_strong and slot in ("nameTag", "chatBalloon"):
+            _ctoks = set()
         def _cadj(r):
             cc = ITEM_CAPCOLORS[r]
             if cc is not None:
@@ -1175,7 +1179,7 @@ async def rate(req: RateReq):
 
 
 # ── 기능 안내(POST /guide) ─────────────────────────────────────────
-# front 건의함의 '질문' 탭과 건의 등록 전 확인이 쓴다. 기능 목록(catalog)은 **front 가 보낸다**(front/src/lib/guide.ts 가 정본).
+# front '도움 및 가이드'의 도움 탭과 건의 등록 전 확인이 쓴다. 기능 목록(catalog)은 **front 가 보낸다**(front/src/lib/guide.ts 가 정본).
 # 모델은 목록에서 맞는 항목을 **고르기만** 한다 — 화면은 고른 항목의 글을 그대로 보여 주므로 없는 메뉴를 지어낼 수 없다.
 # reply 는 고른 항목을 이어 주는 짧은 한두 문장이고, 걸러지면 화면이 항목 글만 보여 준다.
 GUIDE_MODEL = os.environ.get("GUIDE_MODEL", "qwen-flash")
@@ -1226,7 +1230,7 @@ class GuideEntry(BaseModel):
 
 class GuideReq(BaseModel):
     q: str
-    mode: str = "ask"            # ask = 질문 탭, check = 건의 등록 전 확인
+    mode: str = "ask"            # ask = 도움 탭, check = 건의 등록 전 확인
     history: list[GuideTurn] = []
     catalog: list[GuideEntry] = []
 
