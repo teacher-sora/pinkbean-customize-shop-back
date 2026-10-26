@@ -709,7 +709,7 @@ async def embed_query(text: str) -> np.ndarray:
 def health():
     return {"ok": True, "count": N, "dim": DIM, "model": EMBED_MODEL,
             "slots": {k: int(len(v)) for k, v in SLOT_ROWS.items()},
-            "looks": len(LOOKS["lines"]), "looksReady": LOOKS["ready"]}  # 코디 조합 표본(아래 POST /looks)
+            "looks": LOOKS["n"], "looksReady": LOOKS["ready"]}  # 코디 조합 표본(아래 POST /looks)
 
 
 # 사용자가 직접 말한 부위 이름 → 부위. (형태를 가리키는 말 '원피스·드레스·치마·바지'는 넣지 않는다 — 캡션 낱말이다.)
@@ -1289,67 +1289,83 @@ async def guide(req: GuideReq):
 
 
 # ── 코디 조합 표본(POST /looks) ──────────────────────────────────────
-# 넥슨 랭킹 캐릭터의 실제 코디 표본(parser looks/ 가 만들어 CDN looks/v1/looks.jsonl.gz 에 올린다)에서
-# 아이템 여러 개를 함께 쓴 코디를 찾는다. 한 줄 = {i, n, sk, s}: i 번호(입은 사람이 많은 순), n 입은 사람 수, sk 피부 카드 id, s 스냅샷.
+# 넥슨 랭킹 캐릭터의 실제 코디 표본(parser looks/ 가 만들어 CDN looks/v1/ 에 올린다)에서 아이템 여러 개를 함께 쓴 코디를 찾는다.
+#  · looks.jsonl.gz 한 줄 = {i, n, sk, s}: i 번호(입은 사람이 많은 순), n 입은 사람 수, sk 피부 카드 id, s 스냅샷.
+#  · dyes.json = 아이템 id → 가장 많이 쓴 염색 6가지(만들기 단계에서 센다 — 서버 메모리에서 세지 않는다).
 # 기동하면 뒤에서 받아 색인을 만든다 — 받기 전이나 실패하면 ready=False 로 답한다(검색 · 평가와 상관없이 이 기능만 꺼진다).
+# 메모리(512MB 한 대): 줄은 풀어 둔 바이트 한 덩어리 + 줄 시작 위치 배열로만 든다(줄마다 파이썬 객체를 만들지 않는다).
+# 아이템 → 코디 번호는 4바이트 배열(array) 로 모은 뒤 numpy 로 바꾼다.
 # 저장소에 커밋하지 않는다(표본은 30일마다 다시 만든다 — 넥슨 약관의 갱신 의무. 커밋하면 저장소가 매번 커진다).
 import gzip
 import threading
-from collections import Counter, defaultdict
+from array import array
+from collections import defaultdict
 
 LOOKS_URL = os.environ.get("LOOKS_URL", "https://cdn.pinkbean-customize.com/looks/v1/looks.jsonl.gz")  # 파일 경로도 된다(로컬 확인)
-LOOKS_DYES = 6  # 아이템마다 돌려줄 자주 쓴 염색 수
-LOOKS = {"ready": False, "lines": [], "post": {}, "dyes": {}, "error": ""}
+LOOKS = {"ready": False, "blob": b"", "starts": None, "n": 0, "post": {}, "dyes": {}, "error": ""}
+_SLOT_ITEMS = re.compile(rb'"equipped":\{([^}]*)\}')
+_KV = re.compile(rb'"[A-Za-z]+":"(\d+)"')
+_SK = re.compile(rb'"sk":"(\d+)"')
 
 
-def _dye_key(s: dict, slot: str):
-    """그 부위의 염색 — (종류, 값). 헤어 · 성형은 믹스(팔레트), 그 밖과 피부는 HSB. 없으면 None."""
-    if slot in (s.get("dyePalette") or {}):
-        return ("palette", json.dumps(s["dyePalette"][slot], sort_keys=True))
-    if slot in (s.get("dyeHsb") or {}):
-        return ("hsb", json.dumps(s["dyeHsb"][slot], sort_keys=True))
-    return None
+def _get(url: str, built: str) -> bytes:
+    if url.startswith("http"):
+        r = httpx.get(url, params={"v": built} if built else None, timeout=180.0)
+        r.raise_for_status()
+        return r.content
+    with open(url, "rb") as f:
+        return f.read()
 
 
 def _load_looks():
     try:
         t0 = time.time()
+        base = LOOKS_URL.rsplit("/", 1)[0]
+        # CDN 은 .gz 를 4시간 캐시한다 — 옆의 meta.json(60초 캐시)의 만든 시각을 붙여 새 표본을 바로 받는다
+        built = ""
         if LOOKS_URL.startswith("http"):
-            # CDN 은 .gz 를 4시간 캐시한다 — 옆의 meta.json(60초 캐시)의 만든 시각을 붙여 새 표본을 바로 받는다
-            built = ""
             try:
-                built = httpx.get(LOOKS_URL.rsplit("/", 1)[0] + "/meta.json", timeout=20.0).json().get("built", "")
+                built = httpx.get(base + "/meta.json", timeout=20.0).json().get("built", "")
             except Exception:
                 pass
-            r = httpx.get(LOOKS_URL, params={"v": built} if built else None, timeout=180.0)
-            r.raise_for_status()
-            raw = gzip.decompress(r.content)
-        else:
-            with open(LOOKS_URL, "rb") as f:
-                raw = gzip.decompress(f.read())
-        lines, post, dyes = [], defaultdict(list), defaultdict(Counter)
-        for i, l in enumerate(raw.splitlines()):
-            if not l:
-                continue
-            o = json.loads(l)
-            s, n, sk = o["s"], o["n"], o.get("sk")
-            lines.append(l)  # 응답할 때만 푼다(바이트로 들고 있는 편이 가볍다)
-            items = [(slot, iid) for slot, iid in (s.get("equipped") or {}).items() if iid]
-            if sk:
-                items.append(("skin", sk))
-            for slot, iid in set(items):
-                post[iid].append(i)
-                dk = _dye_key(s, slot)
-                if dk:
-                    dyes[iid][dk] += n  # 입은 사람 수로 센다
-        LOOKS["post"] = {k: np.asarray(v, dtype=np.int32) for k, v in post.items()}  # 줄 순서 = 많이 입은 순 → 교집합도 그 순서
-        LOOKS["dyes"] = {k: [{"kind": kd, "v": json.loads(v), "n": c} for (kd, v), c in cnt.most_common(LOOKS_DYES)] for k, cnt in dyes.items()}
-        LOOKS["lines"] = lines
+        blob = gzip.decompress(_get(LOOKS_URL, built))
+        try:
+            dyes = json.loads(_get(base + "/dyes.json", built))
+        except Exception:
+            dyes = {}
+        starts = array("q")
+        post = defaultdict(lambda: array("i"))
+        pos, i = 0, 0
+        while pos < len(blob):
+            end = blob.find(b"\n", pos)
+            if end < 0:
+                end = len(blob)
+            if end > pos:
+                line = blob[pos:end]
+                starts.append(pos)
+                m = _SLOT_ITEMS.search(line)
+                ids = set(_KV.findall(m.group(1))) if m else set()
+                sk = _SK.search(line)
+                if sk:
+                    ids.add(sk.group(1))
+                for iid in ids:
+                    post[iid.decode()].append(i)
+                i += 1
+            pos = end + 1
+        starts.append(len(blob))
+        LOOKS["post"] = {k: np.frombuffer(v, dtype=np.int32).copy() for k, v in post.items()}  # 줄 순서 = 많이 입은 순 → 교집합도 그 순서
+        LOOKS["starts"] = np.frombuffer(starts, dtype=np.int64).copy()
+        LOOKS["blob"], LOOKS["n"], LOOKS["dyes"] = blob, i, dyes
         LOOKS["ready"] = True
-        print(f"looks: {len(lines)}벌, 아이템 {len(post)}종, {time.time() - t0:.1f}초", flush=True)
+        print(f"looks: {i}벌, 아이템 {len(post)}종, {time.time() - t0:.1f}초", flush=True)
     except Exception as e:
         LOOKS["error"] = str(e)[:200]
         print(f"looks: 적재 실패 {LOOKS['error']}", flush=True)
+
+
+def _look_row(i: int) -> dict:
+    st = LOOKS["starts"]
+    return json.loads(LOOKS["blob"][int(st[i]):int(st[i + 1])].rstrip(b"\n"))
 
 
 threading.Thread(target=_load_looks, daemon=True).start()
@@ -1376,7 +1392,7 @@ def looks(req: LooksReq):
     for a in arrs[1:]:
         hit = np.intersect1d(hit, a, assume_unique=True)
     sel = hit[page * size:(page + 1) * size]
-    out = {**base, "total": int(len(hit)), "looks": [json.loads(LOOKS["lines"][int(i)]) for i in sel]}
+    out = {**base, "total": int(len(hit)), "looks": [_look_row(int(i)) for i in sel]}
     if len(ids) == 1 and page == 0:
         out["dyes"] = LOOKS["dyes"].get(ids[0], [])
     return out
