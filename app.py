@@ -1290,19 +1290,23 @@ async def guide(req: GuideReq):
 
 # ── 코디 조합 표본(POST /looks) ──────────────────────────────────────
 # 넥슨 랭킹 캐릭터의 실제 코디 표본(parser looks/ 가 만들어 CDN looks/v1/ 에 올린다)에서 아이템 여러 개를 함께 쓴 코디를 찾는다.
-#  · looks.jsonl.gz 한 줄 = {i, n, sk, s}: i 번호(입은 사람이 많은 순), n 입은 사람 수, sk 피부 카드 id, s 스냅샷.
+#  · looks.jsonl.gz 한 줄 = {i, n, sk, s}: i 번호(꾸민 코디 · 랭킹 상위가 먼저 — parser looks/build.ts), n 입은 사람 수, sk 피부 카드 id, s 스냅샷.
 #  · dyes.json = 아이템 id → 가장 많이 쓴 염색 6가지(만들기 단계에서 센다 — 서버 메모리에서 세지 않는다).
 # 기동하면 뒤에서 받아 색인을 만든다 — 받기 전이나 실패하면 ready=False 로 답한다(검색 · 평가와 상관없이 이 기능만 꺼진다).
-# 메모리(512MB 한 대): 줄은 풀어 둔 바이트 한 덩어리 + 줄 시작 위치 배열로만 든다(줄마다 파이썬 객체를 만들지 않는다).
+# 메모리(512MB 한 대 — 검색 모델과 나눠 쓴다): 받은 파일을 줄 단위로 흘려 읽고, 줄은 LOOK_BLOCK 줄씩 다시 압축한 덩어리로만 든다
+# (요청이 오면 그 쪽에 든 덩어리만 푼다). 풀어 둔 채 들면 20만 벌에서 150MB 를 넘어 기동하다 메모리가 모자라 죽었다.
 # 아이템 → 코디 번호는 4바이트 배열(array) 로 모은 뒤 numpy 로 바꾼다.
 # 저장소에 커밋하지 않는다(표본은 30일마다 다시 만든다 — 넥슨 약관의 갱신 의무. 커밋하면 저장소가 매번 커진다).
 import gzip
+import io
 import threading
+import zlib
 from array import array
 from collections import defaultdict
 
 LOOKS_URL = os.environ.get("LOOKS_URL", "https://cdn.pinkbean-customize.com/looks/v1/looks.jsonl.gz")  # 파일 경로도 된다(로컬 확인)
-LOOKS = {"ready": False, "blob": b"", "starts": None, "n": 0, "post": {}, "dyes": {}, "error": ""}
+LOOKS = {"ready": False, "blocks": [], "n": 0, "post": {}, "dyes": {}, "error": ""}
+LOOK_BLOCK = 32  # 덩어리 하나의 줄 수 — 쪽 하나(최대 60벌)를 그려도 푸는 양이 몇 MB 를 넘지 않는다
 _SLOT_ITEMS = re.compile(rb'"equipped":\{([^}]*)\}')
 _KV = re.compile(rb'"[A-Za-z]+":"(\d+)"')
 _SK = re.compile(rb'"sk":"(\d+)"')
@@ -1328,21 +1332,20 @@ def _load_looks():
                 built = httpx.get(base + "/meta.json", timeout=20.0).json().get("built", "")
             except Exception:
                 pass
-        blob = gzip.decompress(_get(LOOKS_URL, built))
+        raw = _get(LOOKS_URL, built)
         try:
             dyes = json.loads(_get(base + "/dyes.json", built))
         except Exception:
             dyes = {}
-        starts = array("q")
+        blocks: list[bytes] = []
+        buf: list[bytes] = []
         post = defaultdict(lambda: array("i"))
-        pos, i = 0, 0
-        while pos < len(blob):
-            end = blob.find(b"\n", pos)
-            if end < 0:
-                end = len(blob)
-            if end > pos:
-                line = blob[pos:end]
-                starts.append(pos)
+        i = 0
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as f:
+            for line in f:
+                line = line.rstrip(b"\n")
+                if not line:
+                    continue
                 m = _SLOT_ITEMS.search(line)
                 ids = set(_KV.findall(m.group(1))) if m else set()
                 sk = _SK.search(line)
@@ -1350,22 +1353,33 @@ def _load_looks():
                     ids.add(sk.group(1))
                 for iid in ids:
                     post[iid.decode()].append(i)
+                buf.append(line)
                 i += 1
-            pos = end + 1
-        starts.append(len(blob))
-        LOOKS["post"] = {k: np.frombuffer(v, dtype=np.int32).copy() for k, v in post.items()}  # 줄 순서 = 많이 입은 순 → 교집합도 그 순서
-        LOOKS["starts"] = np.frombuffer(starts, dtype=np.int64).copy()
-        LOOKS["blob"], LOOKS["n"], LOOKS["dyes"] = blob, i, dyes
+                if len(buf) == LOOK_BLOCK:
+                    blocks.append(zlib.compress(b"\n".join(buf), 6))
+                    buf = []
+        if buf:
+            blocks.append(zlib.compress(b"\n".join(buf), 6))
+        del raw
+        LOOKS["post"] = {k: np.frombuffer(v, dtype=np.int32).copy() for k, v in post.items()}  # 줄 순서 = 보여 줄 순서 → 교집합도 그 순서
+        LOOKS["blocks"], LOOKS["n"], LOOKS["dyes"] = blocks, i, dyes
         LOOKS["ready"] = True
-        print(f"looks: {i}벌, 아이템 {len(post)}종, {time.time() - t0:.1f}초", flush=True)
+        print(f"looks: {i}벌, 아이템 {len(post)}종, 덩어리 {sum(len(x) for x in blocks) >> 20}MB, {time.time() - t0:.1f}초", flush=True)
     except Exception as e:
         LOOKS["error"] = str(e)[:200]
         print(f"looks: 적재 실패 {LOOKS['error']}", flush=True)
 
 
-def _look_row(i: int) -> dict:
-    st = LOOKS["starts"]
-    return json.loads(LOOKS["blob"][int(st[i]):int(st[i + 1])].rstrip(b"\n"))
+def _look_rows(sel) -> list[dict]:
+    # 같은 덩어리는 한 번만 푼다
+    opened: dict[int, list[bytes]] = {}
+    out = []
+    for i in sel:
+        b, k = divmod(int(i), LOOK_BLOCK)
+        if b not in opened:
+            opened[b] = zlib.decompress(LOOKS["blocks"][b]).split(b"\n")
+        out.append(json.loads(opened[b][k]))
+    return out
 
 
 threading.Thread(target=_load_looks, daemon=True).start()
@@ -1392,7 +1406,7 @@ def looks(req: LooksReq):
     for a in arrs[1:]:
         hit = np.intersect1d(hit, a, assume_unique=True)
     sel = hit[page * size:(page + 1) * size]
-    out = {**base, "total": int(len(hit)), "looks": [_look_row(int(i)) for i in sel]}
+    out = {**base, "total": int(len(hit)), "looks": _look_rows(sel)}
     if len(ids) == 1 and page == 0:
         out["dyes"] = LOOKS["dyes"].get(ids[0], [])
     return out
