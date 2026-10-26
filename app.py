@@ -1315,7 +1315,13 @@ def _load_looks():
     try:
         t0 = time.time()
         if LOOKS_URL.startswith("http"):
-            r = httpx.get(LOOKS_URL, timeout=180.0)
+            # CDN 은 .gz 를 4시간 캐시한다 — 옆의 meta.json(60초 캐시)의 만든 시각을 붙여 새 표본을 바로 받는다
+            built = ""
+            try:
+                built = httpx.get(LOOKS_URL.rsplit("/", 1)[0] + "/meta.json", timeout=20.0).json().get("built", "")
+            except Exception:
+                pass
+            r = httpx.get(LOOKS_URL, params={"v": built} if built else None, timeout=180.0)
             r.raise_for_status()
             raw = gzip.decompress(r.content)
         else:
