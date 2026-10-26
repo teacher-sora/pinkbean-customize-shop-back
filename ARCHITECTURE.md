@@ -32,7 +32,7 @@
 
 | 경로 | 내용 |
 |---|---|
-| `app.py` | 서버 전부. 기동할 때 `data/` 를 메모리에 올린다 |
+| `app.py` | 서버 전부. 기동할 때 `data/` 를 메모리에 올리고, 코디 조합 표본(CDN `looks/v1/looks.jsonl.gz`)은 뒤에서 받아 색인을 만든다 |
 | `data/vectors_256.f16.npy` | 아이템당 한 행(256차원 float16, L2 정규화). 코사인 = 내적 |
 | `data/vectors_short_256.f16.npy` | 짧은 캡션의 벡터. `meta.short_rows` 가 각 벡터가 속한 아이템 행 번호다 |
 | `data/meta.json` | `{dim, model, count, items, short_rows}`. `items` 는 벡터 행과 **같은 순서**의 `{id, slot, name, words, short, label, isCash, gender, tier, kind?, type?, has_ears?, animal?, recency?}` |
@@ -52,14 +52,22 @@
 ## 3. API
 
 ```
-GET  /health   → { ok, count, dim, model, slots{부위: 개수} }
+GET  /health   → { ok, count, dim, model, slots{부위: 개수}, looks, looksReady }
 POST /search   { "query": "세일러복 절대영역", "slot": "longcoat"|null, "topK": 100 }
                → { query, slot, refined, count, ms{refine, embed, total}, results: [{ id, slot, name, label, isCash, gender, words, tier, score }] }
 POST /rate     { "items": [{ "slot", "name", "id" }], "history": ["직전 말풍선"], "recent_slots": ["바로 앞에 본 부위"] }
                → { bubbles: ["…"], model, dropped }
 POST /guide    { "q": "표정 바꾸는 법", "mode": "ask"|"check", "history": [{ "r": "u"|"a", "t": "…" }], "catalog": [{ "id", "t" }] }
                → { kind: "feature"|"none"|"chat"|"error", ids: ["기능 id"], reply, model }
+POST /looks    { "ids": ["아이템 id", …(1~4)], "page": 0, "size": 30(≤60) }
+               → { ready, total, page, size, looks: [{ i, n, sk, s }], dyes?: [{ kind: "palette"|"hsb", v, n }] }
 ```
+
+- **`/looks`(코디 조합)**: 넥슨 랭킹 캐릭터의 실제 코디 표본에서 `ids` 를 **모두** 쓴 코디를 입은 사람이 많은 순으로 준다.
+  - 표본은 parser `looks/`(수집 → 만들기)가 CDN `looks/v1/looks.jsonl.gz` 에 올린다. 한 줄 = `{i 번호, n 입은 사람 수, sk 피부 카드 id(톤의 몸 id), s 스냅샷}`.
+  - 기동하면 뒤에서 받아(`LOOKS_URL`, 파일 경로도 된다) 아이템 → 코디 번호 배열(줄 순서 = 많이 입은 순)을 만든다. 교집합은 짧은 배열부터 `np.intersect1d`. 받기 전이나 실패하면 `ready: false` 이고 다른 API 와 상관없이 이 기능만 꺼진다.
+  - `dyes` 는 아이템이 하나이고 첫 쪽일 때만 — 그 아이템에 가장 많이 쓴 염색 6가지(입은 사람 수로 센다). 헤어 · 성형은 믹스(`palette`), 그 밖과 피부는 HSB(`hsb`). 피부는 목록의 피부 카드 id(`sk`)로 묻는다.
+  - 저장소에 커밋하지 않는다 — 표본은 30일마다 다시 만든다(넥슨 약관의 갱신 의무). 커밋하면 저장소가 매번 커진다. 표본을 바꾸면 서버를 다시 띄워야 새 표본을 쓴다.
 
 - front 는 `/search` 를 늘 `slot: null` 로 부르고 결과의 `id`·`slot` 만 쓴다. `/rate` 에서는 `bubbles` 와 `slots` 를 쓴다.
 - 빈 질의는 `{query, count: 0, results: []}`, 후보가 하나도 없으면 `ms`·`refined` 없이 `{query, slot, count: 0, results: []}`.

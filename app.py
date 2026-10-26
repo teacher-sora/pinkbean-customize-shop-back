@@ -708,7 +708,8 @@ async def embed_query(text: str) -> np.ndarray:
 @app.get("/health")
 def health():
     return {"ok": True, "count": N, "dim": DIM, "model": EMBED_MODEL,
-            "slots": {k: int(len(v)) for k, v in SLOT_ROWS.items()}}
+            "slots": {k: int(len(v)) for k, v in SLOT_ROWS.items()},
+            "looks": len(LOOKS["lines"]), "looksReady": LOOKS["ready"]}  # 코디 조합 표본(아래 POST /looks)
 
 
 # 사용자가 직접 말한 부위 이름 → 부위. (형태를 가리키는 말 '원피스·드레스·치마·바지'는 넣지 않는다 — 캡션 낱말이다.)
@@ -1285,3 +1286,91 @@ async def guide(req: GuideReq):
     if (kind == "none" and ntype != "other") or _unsafe(reply):
         reply = ""
     return {"kind": kind, "ids": ids, "type": ntype, "reply": reply, "model": GUIDE_MODEL}
+
+
+# ── 코디 조합 표본(POST /looks) ──────────────────────────────────────
+# 넥슨 랭킹 캐릭터의 실제 코디 표본(parser looks/ 가 만들어 CDN looks/v1/looks.jsonl.gz 에 올린다)에서
+# 아이템 여러 개를 함께 쓴 코디를 찾는다. 한 줄 = {i, n, sk, s}: i 번호(입은 사람이 많은 순), n 입은 사람 수, sk 피부 카드 id, s 스냅샷.
+# 기동하면 뒤에서 받아 색인을 만든다 — 받기 전이나 실패하면 ready=False 로 답한다(검색 · 평가와 상관없이 이 기능만 꺼진다).
+# 저장소에 커밋하지 않는다(표본은 30일마다 다시 만든다 — 넥슨 약관의 갱신 의무. 커밋하면 저장소가 매번 커진다).
+import gzip
+import threading
+from collections import Counter, defaultdict
+
+LOOKS_URL = os.environ.get("LOOKS_URL", "https://cdn.pinkbean-customize.com/looks/v1/looks.jsonl.gz")  # 파일 경로도 된다(로컬 확인)
+LOOKS_DYES = 6  # 아이템마다 돌려줄 자주 쓴 염색 수
+LOOKS = {"ready": False, "lines": [], "post": {}, "dyes": {}, "error": ""}
+
+
+def _dye_key(s: dict, slot: str):
+    """그 부위의 염색 — (종류, 값). 헤어 · 성형은 믹스(팔레트), 그 밖과 피부는 HSB. 없으면 None."""
+    if slot in (s.get("dyePalette") or {}):
+        return ("palette", json.dumps(s["dyePalette"][slot], sort_keys=True))
+    if slot in (s.get("dyeHsb") or {}):
+        return ("hsb", json.dumps(s["dyeHsb"][slot], sort_keys=True))
+    return None
+
+
+def _load_looks():
+    try:
+        t0 = time.time()
+        if LOOKS_URL.startswith("http"):
+            r = httpx.get(LOOKS_URL, timeout=180.0)
+            r.raise_for_status()
+            raw = gzip.decompress(r.content)
+        else:
+            with open(LOOKS_URL, "rb") as f:
+                raw = gzip.decompress(f.read())
+        lines, post, dyes = [], defaultdict(list), defaultdict(Counter)
+        for i, l in enumerate(raw.splitlines()):
+            if not l:
+                continue
+            o = json.loads(l)
+            s, n, sk = o["s"], o["n"], o.get("sk")
+            lines.append(l)  # 응답할 때만 푼다(바이트로 들고 있는 편이 가볍다)
+            items = [(slot, iid) for slot, iid in (s.get("equipped") or {}).items() if iid]
+            if sk:
+                items.append(("skin", sk))
+            for slot, iid in set(items):
+                post[iid].append(i)
+                dk = _dye_key(s, slot)
+                if dk:
+                    dyes[iid][dk] += n  # 입은 사람 수로 센다
+        LOOKS["post"] = {k: np.asarray(v, dtype=np.int32) for k, v in post.items()}  # 줄 순서 = 많이 입은 순 → 교집합도 그 순서
+        LOOKS["dyes"] = {k: [{"kind": kd, "v": json.loads(v), "n": c} for (kd, v), c in cnt.most_common(LOOKS_DYES)] for k, cnt in dyes.items()}
+        LOOKS["lines"] = lines
+        LOOKS["ready"] = True
+        print(f"looks: {len(lines)}벌, 아이템 {len(post)}종, {time.time() - t0:.1f}초", flush=True)
+    except Exception as e:
+        LOOKS["error"] = str(e)[:200]
+        print(f"looks: 적재 실패 {LOOKS['error']}", flush=True)
+
+
+threading.Thread(target=_load_looks, daemon=True).start()
+
+
+class LooksReq(BaseModel):
+    ids: list[str]   # 아이템 id 1~4개(피부는 목록의 피부 카드 id) — 모두 쓴 코디만
+    page: int = 0
+    size: int = 30
+
+
+@app.post("/looks")
+def looks(req: LooksReq):
+    ids = [x for x in dict.fromkeys(req.ids) if isinstance(x, str) and x][:4]
+    page, size = max(0, int(req.page)), max(1, min(60, int(req.size)))
+    base = {"ready": LOOKS["ready"], "total": 0, "page": page, "size": size, "looks": []}
+    if not LOOKS["ready"] or not ids:
+        return base
+    arrs = [LOOKS["post"].get(x) for x in ids]
+    if any(a is None for a in arrs):
+        return {**base, **({"dyes": []} if len(ids) == 1 and page == 0 else {})}
+    arrs.sort(key=len)
+    hit = arrs[0]
+    for a in arrs[1:]:
+        hit = np.intersect1d(hit, a, assume_unique=True)
+    sel = hit[page * size:(page + 1) * size]
+    out = {**base, "total": int(len(hit)), "looks": [json.loads(LOOKS["lines"][int(i)]) for i in sel]}
+    if len(ids) == 1 and page == 0:
+        out["dyes"] = LOOKS["dyes"].get(ids[0], [])
+    return out
