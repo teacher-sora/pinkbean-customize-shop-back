@@ -37,7 +37,7 @@
 
 | 경로 | 내용 |
 |---|---|
-| `app.py` | 서버 전부. 기동할 때 `data/` 를 메모리에 올리고, 코디 조합 표본(CDN `looks/v1/looks.jsonl.gz`)은 뒤에서 받아 색인을 만든다 |
+| `app.py` | 서버 전부. 기동할 때 `data/` 를 메모리에 올린다 |
 | `data/vectors_256.f16.npy` | 아이템당 한 행(256차원 float16, L2 정규화). 코사인 = 내적 |
 | `data/vectors_short_256.f16.npy` | 짧은 캡션의 벡터. `meta.short_rows` 가 각 벡터가 속한 아이템 행 번호다 |
 | `data/meta.json` | `{dim, model, count, items, short_rows}`. `items` 는 벡터 행과 **같은 순서**의 `{id, slot, name, words, short, label, isCash, gender, tier, kind?, type?, has_ears?, animal?, recency?}` |
@@ -57,23 +57,16 @@
 ## 3. API
 
 ```
-GET  /health   → { ok, count, dim, model, slots{부위: 개수}, looks, looksReady }
+GET  /health   → { ok, count, dim, model, slots{부위: 개수} }
 POST /search   { "query": "세일러복 절대영역", "slot": "longcoat"|null, "topK": 100 }
                → { query, slot, refined, count, ms{refine, embed, total}, results: [{ id, slot, name, label, isCash, gender, words, tier, score }] }
 POST /rate     { "items": [{ "slot", "name", "id" }], "history": ["직전 말풍선"], "recent_slots": ["바로 앞에 본 부위"] }
                → { bubbles: ["…"], model, dropped }
 POST /guide    { "q": "표정 바꾸는 법", "mode": "ask"|"check", "history": [{ "r": "u"|"a", "t": "…" }], "catalog": [{ "id", "t" }] }
                → { kind: "feature"|"none"|"chat"|"error", ids: ["기능 id"], reply, model }
-POST /looks    { "ids": ["아이템 id", …(1~4)], "page": 0, "size": 30(≤60) }
-               → { ready, total, page, size, looks: [{ i, n, sk, s }], dyes?: [{ kind: "palette"|"hsb", v, n }] }
 ```
 
-- **`/looks`(코디 조합)**: 넥슨 랭킹 캐릭터의 실제 코디 표본에서 `ids` 를 **모두** 쓴 코디를 표본의 순서(꾸민 코디 · 랭킹 상위가 먼저 — parser `looks/build.ts`)대로 준다.
-  - 표본은 parser `looks/`(수집 → 만들기)가 CDN `looks/v1/looks.jsonl.gz` 에 올린다. 한 줄 = `{i 번호, n 입은 사람 수, sk 피부 카드 id(톤의 몸 id), s 스냅샷}`.
-  - 기동하면 뒤에서 받아(`LOOKS_URL`, 파일 경로도 된다) 아이템 → 코디 번호 배열(줄 순서 = 많이 입은 순)을 만든다. 교집합은 짧은 배열부터 `np.intersect1d`. 받기 전이나 실패하면 `ready: false` 이고 다른 API 와 상관없이 이 기능만 꺼진다.
-  - `dyes` 는 아이템이 하나이고 첫 쪽일 때만 — 그 아이템에 가장 많이 쓴 염색 6가지(입은 사람 수로 센다). 헤어 · 성형은 믹스(`palette`), 그 밖과 피부는 HSB(`hsb`). 피부는 목록의 피부 카드 id(`sk`)로 묻는다. 세는 일은 parser 의 만들기가 하고(`dyes.json`) 서버는 그대로 준다 — 서버 메모리에서 세면 염색 값마다 파이썬 객체가 생겨 512MB 를 넘볼 수 있다.
-  - 메모리(512MB 한 대 — 검색 모델과 나눠 쓴다): 받은 파일을 줄 단위로 흘려 읽고, 줄은 32줄씩 다시 압축한 덩어리로만 든다(요청이 오면 그 쪽에 든 덩어리만 푼다). 아이템 → 코디 번호는 4바이트 배열로 모아 numpy 로 바꾼다. 풀어 둔 채 들던 때는 20만 벌에서 기동하다 메모리가 모자라 죽었다(약 410MB 에서 종료). 실측(로컬, 코디 205,305벌): 압축 덩어리 12MB, 적재 뒤 36MB · 적재 중 최고 59MB, 흩어진 300벌을 꺼내는 데 72ms.
-  - 저장소에 커밋하지 않는다 — 표본은 30일마다 다시 만든다(넥슨 약관의 갱신 의무). 커밋하면 저장소가 매번 커진다. 표본을 바꾸면 서버를 다시 띄워야 새 표본을 쓴다.
+- 코디 조합(사이트의 실제 유저 코디 표본)은 이 서버를 쓰지 않는다 — parser `looks/` 가 CDN `looks/v2/` 에 올린 큰 파일을 브라우저가 범위 요청으로 바로 받는다(front `lib/looks`). 처음에는 이 서버가 표본을 메모리에 들고 `/looks` 로 걸렀지만, 표본이 늘자 메모리가 모자랐고(검색 모델과 512MB 를 나눠 쓴다) 서버가 필요한 일도 아니었다(사용자 지적).
 
 - front 는 `/search` 를 늘 `slot: null` 로 부르고 결과의 `id`·`slot` 만 쓴다. `/rate` 에서는 `bubbles` 와 `slots` 를 쓴다.
 - 빈 질의는 `{query, count: 0, results: []}`, 후보가 하나도 없으면 `ms`·`refined` 없이 `{query, slot, count: 0, results: []}`.
