@@ -908,8 +908,9 @@ async def search(req: SearchReq):
             keep = keep & (_tier | (nb > 0))
         elif _tier is None and bool(IS_V2[rows].all()) and int(keep.sum()) > NO_LEX_CAP:
             # 낱말이 하나도 맞지 않았다(캡션에도 사전에도 없는 말) → 임베딩이 가깝다고 본 것 몇 개만 보여 준다.
+            # 이름이 맞은 것은 이 제한과 상관없이 남긴다(거리 컷과 같다) — 새 이름('학생 세렌 성형')은 캡션 낱말에 없어 여기로 온다.
             _ord = np.argsort(-np.where(keep, rel, -9.0))[:NO_LEX_CAP]
-            keep = np.zeros(len(rows), dtype=bool)
+            keep = nb > 0
             keep[_ord] = True
         # 색을 말한 질의("검은 마스크")는, 그 색이 캡션에 적힌 아이템이 남아 있으면 그것만 남긴다(tier v2 행에 한해).
         # 왜: 색은 말했을 때만 찾아 주기로 했다 — 말했는데 다른 색 마스크가 섞이면 안 된다.
