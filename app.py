@@ -8,6 +8,7 @@ pinkbean-customize-shop-back — AI 코디 검색 · 코디 평가 API
 - 코사인 = 내적(양쪽 정규화). 아이템 수 × 256 브루트포스라 검색 자체는 수 ms 다.
 규칙과 그 이유는 ARCHITECTURE.md 에 있다.
 """
+import asyncio
 import os
 import re
 import json
@@ -16,6 +17,7 @@ import unicodedata
 import random
 import numpy as np
 import httpx
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -111,13 +113,15 @@ WORD_NGRAMS = [(_ngrams(it.get("words")) if it.get("tier") == "v2" else None) fo
 LEX_BONUS = 0.30   # 질의 낱말이 캡션에 그대로 있는 비율 × 이 값
 
 
-def lex_bonus(rows: np.ndarray, qwords: list) -> np.ndarray:
-    """qwords 의 원소는 낱말이거나, 한 낱말을 푼 묶음(' | ' 로 이은 것)."""
+def lex_bonus(rows: np.ndarray, qwords: list, groups_hit: bool = False) -> np.ndarray:
+    """qwords 의 원소는 낱말이거나, 한 낱말을 푼 묶음(' | ' 로 이은 것).
+    groups_hit 이면 가산 대신 '맞은 묶음 수'를 돌려준다(최신 질의의 띠가 쓴다)."""
     out = np.zeros(len(rows), dtype=np.float32)
+    ng = np.zeros(len(rows), dtype=np.int16)
     groups = [[a.strip() for a in w.split("|") if a.strip()] for w in qwords]
     groups = [g for g in groups if g]
     if not groups:
-        return out
+        return ng if groups_hit else out
     for k, r in enumerate(rows.tolist()):
         if IS_V2[r]:
             t = WORD_NGRAMS[r]
@@ -128,12 +132,14 @@ def lex_bonus(rows: np.ndarray, qwords: list) -> np.ndarray:
                 if g[0].startswith("="):   # '=' 로 시작하는 묶음은 하나만 맞아도 다 맞은 것으로 친다(같은 갈래의 다른 이름)
                     if any(" ".join(a.lstrip("=").split()) in t for a in g):
                         tot += 1.0
+                        ng[k] += 1
                     continue
                 hit = sum(1 for a in g if " ".join(a.split()) in t)
                 if hit:
                     tot += 0.25 + 0.75 * hit / len(g)
+                    ng[k] += 1
             out[k] = LEX_BONUS * tot / len(groups)
-    return out
+    return ng if groups_hit else out
 
 
 # 낱말 스키마(이표기 → 대표어). 캡션을 정규화한 것과 **같은 사전**으로 질의 낱말도 바꾼다.
@@ -317,30 +323,110 @@ def phrase_hits(q: str, slot, slot_words=()):
 
 # 성별 = 아이템 "이름"의 접미 (여)/(남) 가 유일한 근거(build/embed_apply.py 가 meta 에 적는다). 0남/1여/2공용.
 GENDERS = np.asarray([it.get("gender") if it.get("gender") is not None else 2 for it in ITEMS], dtype=np.int64)
+# ── 최신순(시즌) ─────────────────────────────────────────────────────
+# 최신은 id 만으로 정하지 않는다(신규 아이템의 id 는 출시 순서가 아니다 — 옛 번호대를 다시 쓴다).
+# 최신순 = 이번 신규(CDN catalog/new.json) → 지난 시즌 신규(catalog/released.json, 최근 시즌부터) → 나머지 id 큰 순.
+# front 목록의 '최신순'(shopData.sortItems)과 같은 규칙이다. 두 파일은 parser 가 패치마다 바꾸므로 CDN 에서 받는다(아래 refresh_seasons).
+CDN_BASE = os.environ.get("CDN_BASE", "https://cdn.pinkbean-customize.com")
+SEASON_TTL = 600   # 초. 이보다 오래된 시즌 표는 검색이 들어올 때 뒤에서 다시 받는다(응답은 기다리지 않는다)
+# 행마다 시즌 단계: 0 = 시즌 신규가 아님, 1 = 가장 오래된 시즌 … 가장 큰 값 = 이번 신규. 받기 전 · 실패 때는 직전 값(처음에는 전부 0).
+SEASON = np.zeros(N, dtype=np.int16)
+_SEASON_STATE = {"at": 0.0, "task": None, "new": [], "seasons": []}
+
+
+def _season_keys(slot, iid):
+    """색 묶음 열쇠. 헤어 · 성형은 meta 에 묶음의 대표 하나만 있으므로 묶음의 어느 색이 신규여도 대표가 신규다
+    (front dye.variantId 의 역 — 헤어는 끝자리, 성형은 백의 자리가 색). 그 밖의 부위는 id 그대로."""
+    try:
+        n = int(iid)
+    except (TypeError, ValueError):
+        return [("i", str(iid))]
+    if slot == "hair":
+        return [("h", n // 10)]
+    if slot == "face":
+        return [("f", (n // 1000) * 100 + n % 100)]
+    if slot is None:   # CDN 의 id 는 부위를 모른다 → 셋 다 맞춰 본다(헤어 · 성형은 id 번호대가 부위마다 따로라 서로 걸리지 않는다)
+        return [("i", str(iid)), ("h", n // 10), ("f", (n // 1000) * 100 + n % 100)]
+    return [("i", str(iid))]
+
+
+_SEASON_KEY_ROWS: dict = {}
+for _i, _it in enumerate(ITEMS):
+    for _k in _season_keys(_it.get("slot"), _it.get("id")):
+        _SEASON_KEY_ROWS.setdefault(_k, []).append(_i)
+
+
 # 최신 가산(헤어·성형·무기): 새로 나온 아이템을 조금 위로. 캡션 유사도가 우선이라 상한을 낮게 둔다
 # (동점~근접 구간에서만 순서가 바뀐다).
-# 기본값은 부위 안 id 의 **순위(백분위)** — id 간격이 들쭉날쭉하거나 이상치가 있어도 왜곡되지 않는다.
-# build/recency.py 가 넣은 recency 가 있는 행은 아래에서 그 값으로 덮는다(recency 가 없는 행만 이 값이 남는다).
+# 기본 최신도 = build/recency.py 가 넣은 recency(부위 안 id 백분위 · 출시 순번 sn 백분위 중 높은 값). 없는 행은 부위 안 id 백분위.
+# 이번 신규 · 지난 시즌 신규는 그 최댓값(1.0) 바로 위에 시즌 순서대로(1.0 + 0.01 × 단계 / 최고 단계), 나머지는 기본 최신도 그대로.
+# 왜 시즌 차이를 작게 두나: 나머지를 낮춰 자리를 만들면(× 0.9) 일반 질의의 순서가 흔들렸다('총'의 디바인 그레이스가 30위 → 31위).
 ID_BONUS_MAX = 0.03
-ID_BONUS = np.zeros(len(ITEMS), dtype=np.float32)
-for _slot in ("hair", "face", "weapon"):
+_RECENCY_SLOTS = ("hair", "face", "weapon")
+RECENCY_BASE = np.zeros(N, dtype=np.float32)
+RECENCY_MASK = np.zeros(N, dtype=bool)
+for _slot in _RECENCY_SLOTS:
     _rows = SLOT_ROWS.get(_slot)
     if _rows is None or len(_rows) < 2:
         continue
-    try:
-        _ids = [int(ITEMS[i]["id"]) for i in _rows.tolist()]
-    except (TypeError, ValueError):
-        continue
-    _order = sorted(range(len(_rows)), key=lambda k: _ids[k])
-    _n = len(_rows)
-    for _rank, _k in enumerate(_order):
-        ID_BONUS[_rows[_k]] = np.float32(ID_BONUS_MAX * _rank / (_n - 1))
-
-# 최신도는 id 만으로 정하지 않는다: 낮은 id 로 나온 신상품이 있다. 빌드가 넣은 recency(0~1 —
-# id 백분위·패치 반영 시각·출시 순번 중 가장 높은 값)가 있으면 그것을 쓴다.
+    RECENCY_MASK[_rows] = True
+    _order = sorted(_rows.tolist(), key=lambda r: int(ITEMS[r]["id"]))
+    for _rank, _r in enumerate(_order):
+        RECENCY_BASE[_r] = _rank / (len(_order) - 1)
 for _i, _it in enumerate(ITEMS):
     if _it.get("recency") is not None:
-        ID_BONUS[_i] = np.float32(ID_BONUS_MAX * float(_it["recency"]))
+        RECENCY_BASE[_i] = float(_it["recency"])
+ID_BONUS = np.zeros(N, dtype=np.float32)
+
+
+def _apply_seasons(new_ids, seasons):
+    """시즌 표 → 행마다 시즌 단계(SEASON)와 최신 가산(ID_BONUS). 배열을 새로 만들어 통째로 바꾼다(검색 도중에 반쯤 바뀐 표를 보지 않게)."""
+    global SEASON, ID_BONUS
+    lv = np.zeros(N, dtype=np.int16)
+    # 가장 최근 시즌이 이번 신규와 겹치면(parser 가 new.json 을 바꿀 때 그 시즌을 쌓는다) 둘은 같은 단계다 —
+    # 그 시즌에만 있는 것(front public/chatui/new.json 에서 온 명찰 · 말풍선 신규)도 이번 신규와 같은 자리.
+    top = len(seasons) if (seasons and set(seasons[-1]) & set(new_ids)) else len(seasons) + 1
+    for si, ids in [(k + 1, s) for k, s in enumerate(seasons)] + [(top, new_ids)]:
+        for iid in ids:
+            for key in _season_keys(None, iid):
+                for r in _SEASON_KEY_ROWS.get(key, ()):
+                    lv[r] = si   # 뒤에 오는 것(최근 시즌 · 이번 신규)이 이긴다
+    bonus = np.where(lv > 0, 1.0 + 0.01 * lv.astype(np.float32) / top, RECENCY_BASE)
+    SEASON, ID_BONUS = lv, (ID_BONUS_MAX * np.where(RECENCY_MASK, bonus, 0.0)).astype(np.float32)
+
+
+_apply_seasons([], [])
+
+
+async def refresh_seasons():
+    """CDN 의 이번 신규 · 지난 시즌 신규를 받아 시즌 표를 바꾼다. 받지 못한 파일은 직전 값을 쓴다(처음이면 빈 표 — 최신순은 id 순으로만)."""
+    st = _SEASON_STATE
+    try:
+        async with httpx.AsyncClient(timeout=3.0, headers={"User-Agent": "pinkbean-customize-shop-back"}) as client:
+            for name in ("new", "released"):
+                try:
+                    r = await client.get(f"{CDN_BASE}/catalog/{name}.json")
+                    r.raise_for_status()
+                    j = r.json()
+                    if name == "new":
+                        st["new"] = [str(x) for x in (j.get("ids") or [])]
+                    else:
+                        st["seasons"] = [[str(x) for x in (s.get("ids") or [])] for s in (j.get("seasons") or []) if isinstance(s, dict)]
+                except Exception as e:
+                    print(f"[app] catalog/{name}.json 받기 실패 — 직전 값을 쓴다: {e!r}")
+        _apply_seasons(st["new"], st["seasons"])
+    except Exception as e:
+        print(f"[app] 시즌 표 갱신 실패 — 직전 값을 쓴다: {e!r}")
+    finally:
+        st["at"] = time.time()
+
+
+def maybe_refresh_seasons():
+    """시즌 표가 SEASON_TTL 보다 오래됐으면 뒤에서 다시 받는다. 응답은 기다리지 않는다."""
+    st = _SEASON_STATE
+    if time.time() - st["at"] > SEASON_TTL and (st["task"] is None or st["task"].done()):
+        st["at"] = time.time()   # 받는 동안 다른 요청이 또 띄우지 않게
+        st["task"] = asyncio.create_task(refresh_seasons())
 
 # ── 색-매칭 점수 ────────────────────────────────────────────────────
 # 질의에 색이 있으면 아이템 "대표색"(아이콘 픽셀 면적최다색; 없으면 캡션 첫 색토큰)이
@@ -675,7 +761,13 @@ def name_bonus_for(rows: np.ndarray, cleaned_query: str) -> np.ndarray:
             out[k] = 1.0
     return out
 
-app = FastAPI(title="pinkbean-customize-shop-back", version="1.0")
+@asynccontextmanager
+async def lifespan(_app):
+    await refresh_seasons()   # 기동 때 한 번 받는다(파일마다 3초 제한 — 실패해도 기동은 이어 간다)
+    yield
+
+
+app = FastAPI(title="pinkbean-customize-shop-back", version="1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 무자격 POST 검색 API → 전체 허용(자격증명 없음)
@@ -769,12 +861,90 @@ def _item_negated(it, ex) -> bool:
     return any(any(tok in s for s in subs) for tok in ex)
 
 
+# ── 최신 질의('최신 아이템', '신규 헤어', '새로 나온 모자') ────────────────
+# 최신 뜻의 낱말은 코드가 가른다(질의 정제 지시문에는 넣지 않는다 — 낱말 목록을 주면 모델이 베껴 넣는다).
+# 그 낱말은 정제 · 임베딩 · 낱말 일치 · 이름 일치에서 뗀다. 왜: '최신'을 낱말로 찾으면 이름에 '최신'이 든 '그 때 최신 핸드폰'이 1위가 됐다.
+_RECENT_WORDS = ("최신", "신규", "신상", "신상품", "신작", "신템", "뉴템", "new")
+_RECENT_PHRASES = ("새로 나온", "새로나온", "새로 출시된", "새로 출시", "새 아이템", "새아이템", "새로운 아이템",
+                   "이번 패치", "이번 시즌", "이번 업데이트", "이번 업뎃", "요즘 나온", "최근 나온", "최근에 나온", "갓 나온", "막 나온")
+_RECENT_TAILS = ("순으로", "순", "아이템", "으로", "로", "의", "템", "꺼", "거", "것", "만", "은", "는", "이", "가", "을", "를", "들")
+_RECENT_RE = re.compile(
+    r"(?<!\S)(?:" + "|".join(re.escape(p) for p in sorted(_RECENT_PHRASES + _RECENT_WORDS, key=len, reverse=True)) + r")"
+    r"(?:" + "|".join(re.escape(t) for t in _RECENT_TAILS) + r")?(?!\S)", re.IGNORECASE)
+# 최신 질의에서만 버리는 군말(남으면 '아이템'을 낱말로 찾는다)
+_RECENT_FILLER = {"아이템", "아이템들", "템", "것", "거", "꺼", "것들", "보여줘", "알려줘", "찾아줘", "추천", "추천해줘",
+                  "뭐", "뭐야", "뭐있어", "있어", "목록", "순", "순서", "순서로", "순으로", "정렬", "전부", "모두", "다",
+                  "나온", "출시", "출시된"}
+# 최신 질의에서 부위만 말했는지 볼 때 쓰는 부위 이름(사용자가 직접 말한 부위 + 사이트의 부위 이름)
+_RECENT_SLOT = dict(_EXPLICIT_SLOT, **{"모자": "cap", "머리": "hair", "얼굴": "face", "장갑": "glove"})
+# 최신순으로 늘어놓을 때 같은 시즌 안의 부위 순서(CDN index 의 부위 순서 — front 목록과 같은 차례)
+_SLOT_ORDER = {s: i for i, s in enumerate(("hair", "face", "cap", "faceAcc", "eyeAcc", "coat", "longcoat", "pants",
+                                            "shoes", "glove", "cape", "weapon", "nameTag", "chatBalloon"))}
+ROW_SLOT_ORDER = np.asarray([_SLOT_ORDER.get(it.get("slot"), 99) for it in ITEMS], dtype=np.int16)
+ROW_IDNUM = np.asarray([int(it["id"]) if str(it.get("id", "")).isdigit() else 0 for it in ITEMS], dtype=np.int64)
+# 최신 + 다른 조건('최신 고양이 모자'): 1위 점수의 이 비율 이상인 '잘 맞는 것' 안에서만 시즌이 앞인 것을 먼저 둔다.
+RECENT_BAND = 0.85
+
+
+def split_recent(q: str):
+    """(최신 질의인가, 최신 낱말 · 군말을 뗀 질의)."""
+    core, n = _RECENT_RE.subn(" ", q or "")
+    if not n:
+        return False, q
+    core = " ".join(t for t in core.split() if t not in _RECENT_FILLER)
+    # 최신 낱말까지 아이템 이름이면('그 때 최신 핸드폰') 이름 검색이다 — 최신 질의로 보지 않는다.
+    # 최신 낱말만 친 것('최신')은 이름에 들어 있어도 최신 질의다.
+    qn = norm_text(detect_gender(q)[1])
+    if core and len(qn) >= 2 and any(qn in nm for nm in NAMES_NORM if nm):
+        return False, q
+    return True, core
+
+
+def recent_only_slots(core: str):
+    """최신 낱말을 뗀 질의가 부위 · 성별만 말했으면 (부위 집합, 성별) — 아니면 None(다른 조건이 있다)."""
+    allowed, _ = detect_gender(core)
+    rest = core
+    for w in _FEMALE + _MALE:
+        rest = rest.replace(w, " ")
+    slots = set()
+    for t in rest.split():
+        if t not in _RECENT_SLOT:
+            return None
+        slots.add(_RECENT_SLOT[t])
+    return slots, allowed
+
+
+def recent_order(rows: np.ndarray) -> np.ndarray:
+    """최신순: 시즌 단계 큰 순 → (같은 단계 안에서) 부위 순서 → id 큰 순. front sortItems('recent')와 같다."""
+    return np.lexsort((-ROW_IDNUM[rows], ROW_SLOT_ORDER[rows], -SEASON[rows].astype(np.int32)))
+
+
 @app.post("/search")
 async def search(req: SearchReq):
     q = (req.query or "").strip()
     if not q:
         return {"query": q, "count": 0, "results": []}
     t0 = time.time()
+    maybe_refresh_seasons()
+    q_raw = q
+    recent, q = split_recent(q)
+    if recent:
+        only = recent_only_slots(q)
+        if only is not None:
+            # 부위 · 성별만 말한 최신 질의 → 정제 · 임베딩 없이 그 안을 최신순 그대로 늘어놓는다.
+            want, allowed_g = only
+            if req.slot and req.slot in SLOT_ROWS:
+                want = {req.slot}
+            rows = SCOPE_ROWS if not want else SCOPE_ROWS[np.isin(SCOPE_ROWS, np.concatenate([SLOT_ROWS[s_] for s_ in want if s_ in SLOT_ROWS] or [np.zeros(0, dtype=np.int64)]))]
+            if allowed_g is not None:
+                rows = rows[np.isin(GENDERS[rows], list(allowed_g))]
+            top = rows[recent_order(rows)][:max(req.topK, 300)]
+            results = [{"id": ITEMS[r]["id"], "slot": ITEMS[r]["slot"], "name": ITEMS[r]["name"],
+                        "label": ITEMS[r].get("label"), "isCash": ITEMS[r].get("isCash"), "gender": ITEMS[r].get("gender"),
+                        "words": ITEMS[r].get("words") or [], "tier": ITEMS[r].get("tier"),
+                        "score": float(SEASON[r])} for r in top.tolist()]
+            return {"query": q_raw, "slot": next(iter(want)) if len(want) == 1 else None, "refined": "", "count": len(results),
+                    "ms": {"refine": 0, "embed": 0, "total": round((time.time() - t0) * 1000)}, "results": results}
     # ① LLM 정제: 문장 → 캡션과 같은 형태(단어 나열) + 부위/성별 분리. 실패하면 규칙 기반으로 폴백.
     ref = await refine_query(q)
     if ref:
@@ -862,7 +1032,7 @@ async def search(req: SearchReq):
     if neg_ex and len(rows):
         rows = rows[np.fromiter((not _item_negated(ITEMS[r], neg_ex) for r in rows.tolist()), dtype=bool, count=len(rows))]
     if len(rows) == 0:
-        return {"query": q, "slot": slot, "count": 0, "results": []}
+        return {"query": q_raw, "slot": slot, "count": 0, "results": []}
     # 관련도 = 캡션 벡터 코사인 + 낱말 일치 가산. 이름 부분일치는 따로 본다(nb).
     # 이름은 정제문·원문 **둘 다**로 본다 — 정제가 이름을 쪼개거나 부위를 떼어내도 이름 검색이 죽지 않도록.
     base = cosine(rows, qv) + lex_bonus(rows, lex_words)  # 개념 코사인 + 낱말 일치(tier v2 행만)
@@ -982,7 +1152,18 @@ async def search(req: SearchReq):
         scores = scores + adj
     # 개념 질의는 상위 N개가 아니라 **거리 컷을 통과한 것을 전부** 돌려준다(상한 300). 순수 색 질의만 topK.
     k = min(max(req.topK, 300) if concept_words else req.topK, len(rows))
-    order = np.argsort(-scores)[:k]
+    if recent and len(rows):
+        # 최신 + 다른 조건: 잘 맞는 것(관련도가 1위의 RECENT_BAND 이상, 또는 이름이 맞은 것) 안에서 시즌이 앞인 것 먼저(같은 시즌은 점수 순),
+        # 그 뒤는 점수 순. 왜 띠를 두나: 컷을 통과한 것 전부를 시즌 순으로 두면 조건에 겨우 걸친 신규가 잘 맞는 옛 아이템을 밀어낸다.
+        # 띠는 이름 가산을 뺀 값으로 잰다 — 이름이 맞은 1위('리본 헤어')가 띠를 끌어올려 캡션이 잘 맞는 신규가 띠 밖으로 밀렸다.
+        # 질의 낱말(묶음)도 가장 많이 맞은 것만큼 맞아야 한다 — 점수만 보면 '꽃 모자'에 '모자'만 맞은 군모(신규)가 1위로 왔다.
+        _rel = scores - NAME_BONUS * nb
+        _best = float(_rel.max())
+        _ng = lex_bonus(rows, lex_words, groups_hit=True)
+        band = ((_rel >= _best - abs(_best) * (1 - RECENT_BAND)) & (_ng >= _ng.max())) | (nb > 0)
+        order = np.lexsort((-scores, -np.where(band, SEASON[rows], 0).astype(np.int32), ~band))[:k]
+    else:
+        order = np.argsort(-scores)[:k]
     top, top_scores = rows[order], scores[order]
 
     results = []
@@ -994,7 +1175,7 @@ async def search(req: SearchReq):
             "words": it.get("words") or [], "tier": it.get("tier"),
             "score": round(float(sc), 4),
         })
-    return {"query": q, "slot": slot, "refined": cleaned, "count": len(results),
+    return {"query": q_raw, "slot": slot, "refined": cleaned, "count": len(results),
             "ms": {"refine": round(t_refine * 1000), "embed": round(t_embed * 1000),
                    "total": round((time.time() - t0) * 1000)},
             "results": results}
