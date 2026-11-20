@@ -1,14 +1,12 @@
 """
-아이템별 최신도(recency, 0~1)를 back/data/meta.json 에 넣는다. app.py 가 이것으로 최신 가산을 준다.
+아이템별 기본 최신도(recency, 0~1)를 back/data/meta.json 에 넣는다. app.py 가 이것으로 최신 가산을 준다.
 
-  python build/recency.py --times META_TIMES.txt [--slots-dir DIR]
+  python build/recency.py --slots-dir DIR
 
-왜: id 가 높다고 최신이 아니다. 낮은 id 로 나온 신상품이 적지 않다.
-최신도 = max( 부위 안 id 백분위 , 패치 반영 시각 점수 , 출시 순번(sn) 백분위 )
-  · 패치 반영 시각: R2 `meta/{id}.json` 의 수정 시각. 이관 기준일(BASELINE) 뒤에 들어온 것은 id 와 무관하게 최신으로 본다.
-    META_TIMES.txt 는 `rclone lsf r2:<버킷>/meta --files-only --format "tp" --separator ";"` 의 출력이다.
-  · sn: CDN slots/*.json 에 있는 부위만(무기·한벌옷 등). 헤어·성형에는 없다.
-한계: 이관 이전에 들어온 '저 id 신상품'은 가릴 자료가 없다 — 그래서 app.py 의 가산 상한을 낮게(0.03) 둔다.
+최신도 = max( 부위 안 id 백분위 , 출시 순번(sn) 백분위 )
+  · sn: CDN slots/*.json 에 있는 부위만(무기 등). 헤어·성형에는 없다. DIR 에 CDN 의 slots/{부위}.json 을 받아 둔다.
+  · 이번 신규 · 지난 시즌 신규(CDN catalog/new.json · released.json)는 여기서 넣지 않는다 — app.py 가 CDN 에서 받아 이 값보다 위에 둔다.
+왜 R2 meta 수정 시각을 쓰지 않나: meta 를 다시 올린 날(헤어 재추출, 염색 불가 수정 등)을 패치 반영 시각으로 잘못 읽어 옛 아이템이 최신으로 떴다.
 대상 부위는 app.py 가 최신 가산을 주는 hair · face · weapon.
 """
 import argparse
@@ -17,31 +15,19 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(os.path.dirname(HERE), "data")
-BASELINE = "2026-07-20"   # CDN 을 처음 채운 날. 이 날짜 뒤에 반영된 meta 는 패치 신규분이다(바꾸지 않는다)
 SLOTS = ("hair", "face", "weapon")
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--times", required=True)
-ap.add_argument("--slots-dir", default=None, help="CDN slots/*.json 을 받아 둔 폴더(sn 용). 없으면 sn 은 쓰지 않는다")
+ap.add_argument("--slots-dir", required=True, help="CDN slots/*.json 을 받아 둔 폴더(sn 용)")
 a = ap.parse_args()
 
-when = {}
-for line in open(a.times, encoding="utf-8"):
-    if ";" in line:
-        t, p = line.strip().split(";", 1)
-        when[p.replace(".json", "")] = t[:10]
-patch_dates = sorted({d for d in when.values() if d > BASELINE})
-# 가장 최근 패치 1.0, 그 앞 패치일수록 조금씩 낮게(가장 오래된 패치도 0.9 — 기준선 아이템 대부분보다 위).
-patch_score = {d: 0.9 + 0.1 * (i + 1) / len(patch_dates) for i, d in enumerate(patch_dates)}
-
 sn = {}
-if a.slots_dir:
-    for s in SLOTS:
-        f = os.path.join(a.slots_dir, f"{s}.json")
-        if os.path.exists(f):
-            for e in json.load(open(f, encoding="utf-8")):
-                if e.get("sn"):
-                    sn[e["id"]] = e["sn"]
+for s in SLOTS:
+    f = os.path.join(a.slots_dir, f"{s}.json")
+    if os.path.exists(f):
+        for e in json.load(open(f, encoding="utf-8")):
+            if e.get("sn"):
+                sn[e["id"]] = e["sn"]
 
 meta = json.load(open(os.path.join(DATA, "meta.json"), encoding="utf-8"))
 items = meta["items"]
@@ -56,12 +42,11 @@ for s in SLOTS:
     sn_pct = {i: r / max(1, len(with_sn) - 1) for r, i in enumerate(with_sn)}
     lifted = 0
     for i in rows:
-        p = patch_score.get(when.get(items[i]["id"], ""), 0.0)
-        v = max(id_pct[i], p, sn_pct.get(i, 0.0))
+        v = max(id_pct[i], sn_pct.get(i, 0.0))
         if v > id_pct[i] + 0.05:
             lifted += 1
         items[i]["recency"] = round(v, 4)
         changed += 1
     print(f"{s}: {len(rows)}개 · id 백분위보다 올라간 것 {lifted}개 (sn 있는 것 {len(with_sn)})")
 json.dump(meta, open(os.path.join(DATA, "meta.json"), "w", encoding="utf-8"), ensure_ascii=False)
-print(f"recency 기록 {changed}개 · 패치일 {patch_dates}")
+print(f"recency 기록 {changed}개")
